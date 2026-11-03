@@ -98,8 +98,15 @@ const FALLBACK_PROGRESSIONS = {
   ],
 };
 
+/** How often deep and melodic house let each chord ring for two bars of an 8-bar loop. */
+const HOLD_CHANCE: Partial<Record<StyleId, number>> = { deepHouse: 0.4, melodicHouse: 0.35 };
+
+/** How often deep house lays a chord over its third, at no creativity and at full. */
+const THIRD_IN_BASS: Partial<Record<StyleId, [number, number]>> = { deepHouse: [0.1, 0.35] };
+
 export function generateProgression(settings: CompositionSettings): Chord[] {
-  const rng = createRng(deriveSeed(settings.harmonySeed ?? settings.seed, 'harmony'));
+  const harmonySeed = settings.harmonySeed ?? settings.seed;
+  const rng = createRng(deriveSeed(harmonySeed, 'harmony'));
   const style = STYLES[settings.style];
   const family = SCALES[settings.scale].family;
   // Diminished and augmented chords rarely suit these genres; skip progressions that land on them in this mode.
@@ -115,12 +122,15 @@ export function generateProgression(settings: CompositionSettings): Chord[] {
   const template = rng.weighted([...staples, ...bold], [...staples.map(() => 1), ...bold.map(() => settings.creativity * 1.2)]);
   const chordTicks = settings.bars === 2 ? TICKS_PER_BAR / 2 : TICKS_PER_BAR;
   const count = totalTicks(settings.bars) / chordTicks;
+  // A held chord still restrikes each bar: the progression moves half as often, in one pass.
+  const holds = settings.bars === 8 && template.length === 4 && createRng(deriveSeed(harmonySeed, 'hold')).chance(HOLD_CHANCE[settings.style] ?? 0);
+  const hold = holds ? 2 : 1;
   const chords = Array.from({ length: count }, (_, i) => ({
-    ...buildChord(settings.key, settings.scale, template[i % template.length], style.extension),
+    ...buildChord(settings.key, settings.scale, template[Math.floor(i / hold) % template.length], style.extension),
     start: i * chordTicks,
     duration: chordTicks,
   }));
-  return colourProgression(settings, chords, template.length);
+  return colourProgression(settings, chords, template.length, hold);
 }
 
 // ---------------------------------------------------------------------------
@@ -822,8 +832,18 @@ function writeBass(settings: CompositionSettings, progression: readonly Chord[],
     return near === null ? options[0] : options.reduce((a, p) => (Math.abs(p - near) < Math.abs(a - near) ? p : a));
   };
 
+  // Deep house sometimes lays a chord over its third, decided once per chord so repeats stay
+  // repeats. Never the loop's opening chord or its tonic, nor a borrowed or passing chord.
+  const inversion = createRng(deriveSeed(seed, 'inversion'));
+  const [plain, bold] = THIRD_IN_BASS[settings.style] ?? [0, 0];
+  const onThird = new Map<number, boolean>();
+  const bassPc = progression.map((chord, i) => {
+    if (i === 0 || chord.root === progression[0].root || chord.scale || chord.duration < TICKS_PER_BAR) return chord.root;
+    if (!onThird.has(chord.root)) onThird.set(chord.root, inversion.chance(lerp(plain, bold, c)));
+    return onThird.get(chord.root) ? chord.tones[1] : chord.root;
+  });
   let prevRoot: number | null = null;
-  const roots = progression.map((c) => (prevRoot = rootNear(c.root, prevRoot)));
+  const roots = progression.map((_, i) => (prevRoot = rootNear(bassPc[i], prevRoot)));
 
   progression.forEach((chord, ci) => {
     const root = roots[ci];

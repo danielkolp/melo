@@ -187,6 +187,19 @@ describe('newChords', () => {
     expect(newChords(c, 3)).toBe(c);
   });
 
+  it('keeps the new chords under an upload when the loop length changes', () => {
+    const c = compose({ seed: 17, bars: 4 });
+    const melody = part(c, 'melody');
+    const source = { fileName: 'lead.mid', key: c.settings.key, scale: c.settings.scale, bars: 4 as const, progression: c.progression, parts: [{ track: 'melody' as const, name: 'Lead', notes: melody }], variationSeed: 1, amount: 0.5, picked: {} };
+    const uploaded = { ...c, source };
+    const changed = newChords(uploaded, 5);
+    expect(changed.settings.harmonySeed).toBeDefined();
+    const longer = recompose(changed, { ...changed.settings, bars: 8 });
+    expect(longer.progression.map((x) => x.tones.join())).toEqual(generateProgression({ ...changed.settings, bars: 8 }).map((x) => x.tones.join()));
+    // Not the upload's own harmony, tiled: that would undo New chords.
+    expect(longer.progression.map((x) => x.tones.join())).not.toEqual([...c.progression, ...c.progression].map((x) => x.tones.join()));
+  });
+
   it('keeps the chords under a locked bar', () => {
     const c = toggleBarLock(compose(), 0);
     const next = newChords(c, 11);

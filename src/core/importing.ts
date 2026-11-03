@@ -2,7 +2,7 @@ import { fitArrangement, suggestArrangement } from './arrangement';
 import { suggestAutomation } from './automation';
 import { generateBrass } from './brass';
 import { perform } from './expression';
-import { clearMelody, generateBass, generateChords, generateCounter, melodySettings, refreshAutomation, withTransition } from './generator';
+import { clearMelody, generateBass, generateChords, generateCounter, generateProgression, melodySettings, refreshAutomation, withTransition } from './generator';
 import { unswingTick } from './groove';
 import { generateMelody } from './melody';
 import { deriveSeed } from './random';
@@ -634,7 +634,11 @@ export function loadHeld(source: ImportSource, settings: CompositionSettings): H
 export function heldFor(composition: Composition, next: CompositionSettings): Held {
   const { source, settings } = composition;
   if (!source) return { progression: [], notes: [] };
-  if (next.bars !== settings.bars) return loadHeld(source, next);
+  if (next.bars !== settings.bars) {
+    const held = loadHeld(source, next);
+    // After New chords the harmony is the loop's own, written again for the new length.
+    return next.harmonySeed === undefined ? held : { ...held, progression: generateProgression(next) };
+  }
   const held = heldTracks(source);
   return {
     progression: moveChords(composition.progression, settings, next),

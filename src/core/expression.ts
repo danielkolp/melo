@@ -21,6 +21,8 @@ interface Touch {
   dynamics: number;
   /** Short notes (four sixteenths or less) sound for this share of their length. */
   gate?: number;
+  /** A sung line: held into a note on the beat across a sixteenth's gap, and letting go a sixteenth early before a rest. */
+  phrased?: boolean;
 }
 
 /**
@@ -30,28 +32,28 @@ interface Touch {
  */
 const TOUCH: Record<StyleId, Partial<Record<TrackId, Touch>>> = {
   ukg: {
-    melody: { nudge: 0, dynamics: 16 },
+    melody: { nudge: 0, dynamics: 16, phrased: true },
     counter: { nudge: 4, dynamics: 12 },
     brass: { nudge: -4, dynamics: 14 },
     chords: { nudge: -6, dynamics: 8, gate: 0.75 },
     bass: { nudge: 0, ghost: 8, dynamics: 4 },
   },
   house: {
-    melody: { nudge: 0, dynamics: 14 },
+    melody: { nudge: 0, dynamics: 14, phrased: true },
     counter: { nudge: 0, dynamics: 10 },
     brass: { nudge: -4, dynamics: 14 },
     chords: { nudge: -3, dynamics: 8, gate: 0.85 },
     bass: { nudge: 0, ghost: 6, dynamics: 4 },
   },
   deepHouse: {
-    melody: { nudge: 8, dynamics: 12 },
+    melody: { nudge: 8, dynamics: 12, phrased: true },
     counter: { nudge: 6, dynamics: 10 },
     brass: { nudge: 4, dynamics: 10 },
     chords: { nudge: 2, dynamics: 6 },
     bass: { nudge: 0, ghost: 6, dynamics: 3 },
   },
   melodicHouse: {
-    melody: { nudge: 0, dynamics: 16 },
+    melody: { nudge: 0, dynamics: 16, phrased: true },
     counter: { nudge: 0, dynamics: 10 },
     brass: { nudge: 0, dynamics: 12 },
     chords: { nudge: 0, dynamics: 10 },
@@ -78,6 +80,26 @@ export function feel(style: StyleId, track: TrackId, n: Pick<NoteEvent, 'start' 
 }
 
 /**
+ * New lengths for a sung line's notes. A held note (longer than an eighth) carries across a
+ * sixteenth's gap into the next note on the beat, unless another top line plays in that gap; a
+ * long note before a rest lets go a sixteenth early. Grace notes stay short.
+ */
+function phrasedLengths(line: readonly NoteEvent[], others: readonly NoteEvent[]): Map<NoteEvent, number> {
+  const out = new Map<NoteEvent, number>();
+  const sorted = [...line].sort((a, b) => a.start - b.start);
+  sorted.forEach((n, i) => {
+    const next = sorted[i + 1];
+    if (!next || next.track !== n.track) return;
+    const end = n.start + n.duration;
+    const gap = next.start - end;
+    const clear = !others.some((o) => o.start < next.start && o.start + o.duration > end);
+    if (gap > 0 && gap <= STEP && n.duration > STEP * 2 && next.start % (STEP * 4) === 0 && clear) out.set(n, next.start - n.start);
+    else if (gap >= STEP * 4 && n.duration >= STEP * 4) out.set(n, n.duration - STEP);
+  });
+  return out;
+}
+
+/**
  * The finished parts, played: each bar louder or softer with the plan's energy (centred, so the
  * part's overall level stays), short chord stabs clipped, and notes nudged off the grid by the
  * style's feel. `tracks`: the parts to touch; the rest pass through as they are.
@@ -86,13 +108,18 @@ export function perform(settings: CompositionSettings, notes: readonly NoteEvent
   const { bars } = makePlan(settings);
   const mean = bars.reduce((a, b) => a + b.energy, 0) / bars.length;
   const touch = TOUCH[settings.style];
+  const lengths = phrasedLengths(
+    notes.filter((n) => tracks.has(n.track) && touch[n.track]?.phrased),
+    notes.filter((n) => n.track === 'counter' || n.track === 'brass'),
+  );
   return notes.map((n) => {
     const t = touch[n.track];
     if (!t || !tracks.has(n.track)) return n;
     const bar = bars[Math.min(bars.length - 1, Math.floor(n.start / TICKS_PER_BAR))];
     const lean = isGhost(n) ? 0 : (bar.energy - mean) * t.dynamics * 2;
     const nudge = feel(settings.style, n.track, n);
-    const duration = t.gate && n.duration <= STEP * 4 && n.duration > STEP ? Math.max(STEP, Math.round((n.duration * t.gate) / STEP) * STEP) : n.duration;
+    const duration =
+      lengths.get(n) ?? (t.gate && n.duration <= STEP * 4 && n.duration > STEP ? Math.max(STEP, Math.round((n.duration * t.gate) / STEP) * STEP) : n.duration);
     const played: NoteEvent = { ...n, velocity: velocity(n.velocity + lean), duration };
     if (nudge) played.nudge = nudge;
     else delete played.nudge;

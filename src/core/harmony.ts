@@ -232,7 +232,8 @@ function twist(h: Harmony, chord: Chord, before: Chord): Chord {
   return options.length ? { ...h.rng.pick(options), start: chord.start, duration: chord.duration } : chord;
 }
 
-export function colourProgression(settings: CompositionSettings, chords: Chord[], slots: number): Chord[] {
+/** `hold`: bars each chord of the template lasts, so both bars of a held chord get the same colour. */
+export function colourProgression(settings: CompositionSettings, chords: Chord[], slots: number, hold = 1): Chord[] {
   const c = settings.creativity;
   if (c <= 0) return chords;
   const h: Harmony = {
@@ -248,7 +249,7 @@ export function colourProgression(settings: CompositionSettings, chords: Chord[]
   const plans = Array.from({ length: slots }, () => ({ borrow: rng.chance(flavour.borrow * c), colour: rng.chance(flavour.colour * c) }));
   const coloured = new Map<number, Chord>();
   let out = chords.map((chord, i) => {
-    const slot = i % slots;
+    const slot = Math.floor(i / hold) % slots;
     const memo = coloured.get(slot);
     if (memo) return { ...memo, start: chord.start, duration: chord.duration };
     let next = chord;
@@ -258,8 +259,8 @@ export function colourProgression(settings: CompositionSettings, chords: Chord[]
     return next;
   });
 
-  // An 8-bar loop's second pass can end somewhere new.
-  if (out.length === slots * 2 && rng.chance(c * 0.6)) {
+  // An 8-bar loop's second pass can end somewhere new. A held progression makes only one pass.
+  if (out.length === slots * hold * 2 && rng.chance(c * 0.6)) {
     const last = out.length - 1;
     out[last] = twist(h, out[last], out[last - 1]);
   }

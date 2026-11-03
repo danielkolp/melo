@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { bassTakes, createSettings, generateBass, generateChords, generateComposition, generateProgression, regenerateTrack } from './generator';
 import { toggleLock } from './locks';
 import { generateMelody, melodyTakes } from './melody';
-import { pickTake, scoreBass, scoreMelody } from './score';
+import { pickTake, scoreBass, scoreBrass, scoreChords, scoreCounter, scoreMelody } from './score';
 import { STYLE_IDS } from './styles';
 import { topTakes } from './takes';
 import { STEP, TICKS_PER_BAR, type NoteEvent } from './types';
@@ -100,10 +100,27 @@ describe('topTakes', () => {
     }
   });
 
-  it('offers none for parts without a score, or that are locked', () => {
+  it('offers takes on every part, and none on a locked one', () => {
     const c = generateComposition(createSettings({ seed: 3 }));
-    expect(topTakes(c, 'chords')).toEqual([]);
+    for (const track of ['counter', 'brass', 'chords'] as const) {
+      const takes = topTakes(c, track);
+      expect(takes.length, track).toBeGreaterThan(1);
+      expect(takes.every((t) => Number.isFinite(t.score)), track).toBe(true);
+      for (let i = 1; i < takes.length; i++) expect(takes[i - 1].score).toBeGreaterThanOrEqual(takes[i].score);
+    }
     expect(topTakes(toggleLock(c, 'melody'), 'melody')).toEqual([]);
     expect(topTakes(c, 'melody')).toEqual(topTakes(c, 'melody'));
+  });
+
+  it('scores the accompaniment for how it sits with the melody', () => {
+    const c = generateComposition(createSettings({ seed: 8, style: 'house' }));
+    const part = (t: string) => c.notes.filter((n) => n.track === t);
+    const melody = part('melody');
+    // A line that just shadows the melody an octave above it, or chords pushed over it, score worse.
+    const shadow = melody.map((n) => ({ ...n, pitch: n.pitch + 12 }));
+    const up = (ns: NoteEvent[]) => ns.map((n) => ({ ...n, pitch: n.pitch + 24 }));
+    expect(scoreCounter(part('counter'), melody, 4)).toBeGreaterThan(scoreCounter(shadow, melody, 4));
+    expect(scoreBrass(part('brass'), melody, part('chords'), 4)).toBeGreaterThan(scoreBrass(shadow, melody, part('chords'), 4));
+    expect(scoreChords(part('chords'), melody, c.settings)).toBeGreaterThan(scoreChords(up(part('chords')), melody, c.settings));
   });
 });

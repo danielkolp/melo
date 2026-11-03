@@ -1,5 +1,5 @@
 import { drumPattern } from './beat';
-import { BASS_FEEL } from './plan';
+import { BASS_FEEL, CHORD_FEEL } from './plan';
 import { chordAt, pc } from './shared';
 import { STEP, STEPS_PER_BAR, TICKS_PER_BAR, type Chord, type Composition, type CompositionSettings, type NoteEvent, type StyleId, type TrackId } from './types';
 
@@ -236,6 +236,57 @@ export function scoreBass(
     1.5 * miss(m.onClap, [0, feel.clap], 0.1) +
     miss(m.period2, [0.6, 1], 0.2) +
     (chords.length ? miss(together, [0.2, 0.75], 0.15) : 0)
+  );
+}
+
+/**
+ * How well a counter-melody take works around `melody`: playing in its gaps, under it where they
+ * meet, one figure that comes back, and moving mostly by small steps.
+ */
+export function scoreCounter(notes: readonly NoteEvent[], melody: readonly NoteEvent[], bars: number): number {
+  if (!notes.length) return -Infinity;
+  const l = line(notes);
+  const moves = l.slice(1).map((n, i) => n.pitch - l[i].pitch);
+  const gaps = share(l, (n) => !melody.some((m) => sounds(m, n.start)));
+  const under = share(l, (n) => !melody.some((m) => sounds(m, n.start) && m.pitch <= n.pitch));
+  return -(
+    2 * miss(gaps, [0.6, 1], 0.2) +
+    2 * miss(under, [0.95, 1], 0.05) +
+    miss(recurrence(barRhythms(l, bars)), [0.5, 1], 0.25) +
+    miss(share(moves, (m) => Math.abs(m) <= 4), [0.5, 1], 0.2)
+  );
+}
+
+/**
+ * How well a brass take sits: under the melody, a figure that comes back, and rarely piling in
+ * where the melody and the chords both strike.
+ */
+export function scoreBrass(notes: readonly NoteEvent[], melody: readonly NoteEvent[], chords: readonly NoteEvent[], bars: number): number {
+  if (!notes.length) return -Infinity;
+  const starts = [...new Set(notes.map((n) => n.start))];
+  const melodyStarts = new Set(melody.map((n) => n.start));
+  const chordStarts = new Set(chords.map((n) => n.start));
+  const under = share(notes, (n) => !melody.some((m) => sounds(m, n.start) && m.pitch < n.pitch));
+  return -(
+    2 * miss(under, [0.95, 1], 0.05) +
+    miss(recurrence(barRhythms(notes, bars)), [0.4, 1], 0.25) +
+    miss(share(starts, (s) => melodyStarts.has(s) && chordStarts.has(s)), [0, 0.3], 0.15)
+  );
+}
+
+/**
+ * How well a chord take sits: the style's share of stabs off the beat, smooth voice leading that
+ * keeps common tones, and nothing sounding at or above the melody.
+ */
+export function scoreChords(notes: readonly NoteEvent[], melody: readonly NoteEvent[], settings: Pick<CompositionSettings, 'style' | 'bars'>): number {
+  if (!notes.length) return -Infinity;
+  const m = chordMetrics(notes, settings.bars);
+  const over = share(melody, (mm) => notes.some((c) => sounds(c, mm.start) && c.pitch >= mm.pitch));
+  return -(
+    2 * miss(m.offbeat, CHORD_FEEL[settings.style].offbeat, 0.15) +
+    miss(m.motion, [0, 2], 0.5) +
+    miss(m.commonTones, [1, 6], 0.5) +
+    2 * miss(over, [0, 0.02], 0.05)
   );
 }
 

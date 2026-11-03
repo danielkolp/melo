@@ -107,6 +107,30 @@ describe('structural invariants', () => {
   });
 });
 
+describe('held chords', () => {
+  /** Each bar's chord, by its downbeat; held when every pair of bars shares one, and the pairs move. */
+  const held = (progression: readonly Chord[]) => {
+    const bars = Array.from({ length: 8 }, (_, b) => chordAt(progression, b * TICKS_PER_BAR));
+    const same = (a: Chord, b: Chord) => a.root === b.root && a.tones.join() === b.tones.join();
+    return [0, 2, 4, 6].every((b) => same(bars[b], bars[b + 1])) && !same(bars[0], bars[2]);
+  };
+
+  it('lets deep and melodic house ring each chord for two bars of an 8-bar loop, and only them', () => {
+    const count: Partial<Record<StyleId, number>> = {};
+    for (const style of STYLE_IDS) {
+      for (let seed = 1; seed <= 60; seed++) {
+        const progression = generateProgression(createSettings({ seed, style, bars: 8 }));
+        if (held(progression)) count[style] = (count[style] ?? 0) + 1;
+      }
+    }
+    expect(count.deepHouse ?? 0).toBeGreaterThan(10);
+    expect(count.melodicHouse ?? 0).toBeGreaterThan(10);
+    // Rap is left out: one of its own vamps already plays each chord twice.
+    for (const style of ['ukg', 'house'] as const) expect(count[style] ?? 0, style).toBe(0);
+    for (let seed = 1; seed <= 30; seed++) expect(held(generateProgression(createSettings({ seed, style: 'deepHouse', bars: 4 })))).toBe(false);
+  });
+});
+
 describe('harmony', () => {
   it('builds one chord per bar (two in a 2-bar loop) at creativity 0', () => {
     expect(generateProgression(createSettings({ bars: 4, creativity: 0 }))).toHaveLength(4);
@@ -215,6 +239,24 @@ describe('melody', () => {
     }
   });
 
+  it('leads into long notes on the beat with its grace notes, sometimes closing in from both sides', () => {
+    let enclosures = 0;
+    for (const settings of corpus()) {
+      const key = scalePitchClasses(settings.key, settings.scale);
+      const { notes, progression } = generateComposition({ ...settings, creativity: 1 });
+      const melody = byTrack(notes, 'melody');
+      melody.forEach((n, i) => {
+        const next = melody[i + 1];
+        if (suits(key, chordAt(progression, n.start)).has(pc(n.pitch)) || !approaches(n, next)) return;
+        expect(next.start % (STEP * 4), 'grace note before the beat').toBe(0);
+        expect(next.duration).toBeGreaterThanOrEqual(STEP * 2);
+        const prev = melody[i - 1];
+        if (prev && prev.duration <= STEP * 2 && Math.sign(prev.pitch - next.pitch) === -Math.sign(n.pitch - next.pitch) && Math.abs(prev.pitch - next.pitch) <= 2) enclosures++;
+      });
+    }
+    expect(enclosures).toBeGreaterThan(0);
+  });
+
   it('lands on chord tones on beats 1 and 3, or holds a suspension the next note resolves by step', () => {
     let strong = 0;
     let suspended = 0;
@@ -288,16 +330,25 @@ describe('counter-melody', () => {
 });
 
 describe('bass', () => {
-  it('plays the chord root first in every chord', () => {
+  it('plays the chord root first in every chord, or in deep house sometimes its third', () => {
+    let thirds = 0;
     for (const settings of corpus()) {
       const { notes, progression } = generateComposition(settings);
       const bass = byTrack(notes, 'bass');
-      for (const chord of progression) {
+      progression.forEach((chord, i) => {
         const first = bass.find((n) => n.start >= chord.start && n.start < chord.start + chord.duration);
         expect(first, 'bass note in chord').toBeDefined();
-        expect(pc(first!.pitch)).toBe(chord.root);
-      }
+        if (pc(first!.pitch) === chord.root) return;
+        // A first inversion: deep house only, never the opening chord, the tonic or a borrowed chord.
+        expect(settings.style).toBe('deepHouse');
+        expect(i).toBeGreaterThan(0);
+        expect(chord.root).not.toBe(progression[0].root);
+        expect(chord.scale).toBeUndefined();
+        expect(pc(first!.pitch)).toBe(chord.tones[1]);
+        thirds++;
+      });
     }
+    expect(thirds).toBeGreaterThan(0);
   });
 
   it('plays from the harmonic scale, or slides a semitone into the next chord', () => {

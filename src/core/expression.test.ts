@@ -91,6 +91,26 @@ describe('perform', () => {
   });
 });
 
+describe('phrasing', () => {
+  it('holds a sung note into the beat across a sixteenth, and lets a long note go before a rest', () => {
+    const settings = createSettings({ style: 'house' });
+    // A held note a sixteenth short of the beat, then a long note before a long rest, then one more.
+    const [into, , long] = perform(settings, [note('melody', 0, 3), note('melody', 4, 2), note('melody', 8, 4), note('melody', 16, 2)], ALL);
+    expect(into.duration).toBe(4 * STEP);
+    expect(long.duration).toBe(3 * STEP);
+  });
+
+  it('keeps grace notes short, leaves the gap when another line plays in it, and keeps rap tight', () => {
+    const house = createSettings({ style: 'house' });
+    const [grace] = perform(house, [note('melody', 1, 2), note('melody', 4, 2)], ALL);
+    expect(grace.duration).toBe(2 * STEP);
+    const [gapped] = perform(house, [note('melody', 0, 3), note('melody', 4, 2), note('counter', 3, 1, 90, 55)], ALL);
+    expect(gapped.duration).toBe(3 * STEP);
+    const [rap] = perform(createSettings({ style: 'rap' }), [note('melody', 0, 3), note('melody', 4, 2)], ALL);
+    expect(rap.duration).toBe(3 * STEP);
+  });
+});
+
 describe('nudge in playback and export', () => {
   it('moves both ends of a swung note, so it keeps its length', () => {
     const plain = swungSpan(STEP * 3, STEP * 2, 62);

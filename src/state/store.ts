@@ -384,7 +384,9 @@ export function createStudioStore(init: StudioInit = {}) {
 
       importParts(source, patch) {
         const comp = present();
-        const settings = { ...comp.settings, ...patch };
+        // The upload brings its own harmony.
+        const { harmonySeed: _, ...current } = comp.settings;
+        const settings = { ...current, ...patch };
         apply(composeAround(settings, source, loadHeld(source, settings), comp.automation, comp.arrangement));
         set({ sidebarTab: 'tracks', sidebarOpen: true, selectedSection: null, activeTrack: source.parts[0].track });
       },

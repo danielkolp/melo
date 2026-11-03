@@ -378,27 +378,37 @@ function embellish(notes: NoteEvent[], ctx: Ctx, rng: Rng, pickup: boolean, role
   if (c <= 0) return notes;
 
   // Decided once per place in the phrase, so a repeated bar is decorated the same way each time.
-  const decided = new Map<string, 'below' | 'above' | 'pop' | null>();
-  const decide = (n: NoteEvent, approach: boolean) => {
-    const key = [roleAt(Math.floor(n.start / TICKS_PER_BAR)), n.start % TICKS_PER_BAR, approach].join(':');
+  const decided = new Map<string, 'below' | 'above' | 'pop' | 'enclose' | null>();
+  const decide = (n: NoteEvent, kind: 'approach' | 'pop' | 'enclose') => {
+    const key = [roleAt(Math.floor(n.start / TICKS_PER_BAR)), n.start % TICKS_PER_BAR, kind].join(':');
     if (!decided.has(key)) {
-      if (approach) decided.set(key, rng.chance(flourish.approach * c) ? (rng.chance(0.7) ? 'below' : 'above') : null);
-      else decided.set(key, rng.chance(flourish.pop * c) ? 'pop' : null);
+      if (kind === 'approach') decided.set(key, rng.chance(flourish.approach * c) ? (rng.chance(0.7) ? 'below' : 'above') : null);
+      else if (kind === 'pop') decided.set(key, rng.chance(flourish.pop * c) ? 'pop' : null);
+      else decided.set(key, rng.chance(0.4) ? 'enclose' : null);
     }
     return decided.get(key);
   };
-  const suspended = (n: NoteEvent) => n.start % (STEP * 8) === 0 && !chordAt(progression, n.start).tones.includes(pc(n.pitch));
+  const suspended = (n: NoteEvent | undefined) => !!n && n.start % (STEP * 8) === 0 && !chordAt(progression, n.start).tones.includes(pc(n.pitch));
+  const short = (n: NoteEvent) => !onBeat(n) && n.duration <= STEP * 2;
+  const leadsInto = (a: NoteEvent, b: NoteEvent) => b.start - (a.start + a.duration) <= STEP;
   notes.forEach((n, i) => {
     const prev = notes[i - 1];
     const next = notes[i + 1];
     // A note resolving a suspension is where it has to be.
-    if (!prev || !next || onBeat(n) || n.duration > STEP * 2 || suspended(prev)) return;
-    if (onBeat(next) && next.start - (n.start + n.duration) <= STEP) {
-      const side = decide(n, true);
+    if (!prev || !next || !short(n) || suspended(prev)) return;
+    if (onBeat(next) && next.duration >= STEP * 2 && leadsInto(n, next)) {
+      // Grace notes only lead into a long note on the beat: a semitone below or above it.
+      const side = decide(n, 'approach');
       const from = next.pitch + (side === 'below' ? -1 : 1);
-      if (side && from >= low && from <= high) n.pitch = from;
-    } else if (n.pitch + 12 <= high && decide(n, false)) {
-      // Up only: the counter-melody sits below the line.
+      if (!side || from < low || from > high) return;
+      n.pitch = from;
+      // Sometimes the note before closes in from the other side, a scale step away: an enclosure.
+      if (short(prev) && leadsInto(prev, n) && !suspended(notes[i - 2]) && decide(prev, 'enclose')) {
+        const other = pool[clamp(nearestIndex(pool, next.pitch) + (side === 'below' ? 1 : -1), 0, pool.length - 1)];
+        if (other !== next.pitch && other >= low && other <= high) prev.pitch = other;
+      }
+    } else if (n.start % (STEP * 2) !== 0 && n.pitch + 12 <= high && decide(n, 'pop')) {
+      // Octave pops on the weak sixteenths only, and up only: the counter-melody sits below the line.
       n.pitch += 12;
     }
   });
@@ -459,10 +469,14 @@ function leaveSpace(bars: BarPlan[], planned: readonly Planned[], form: Resolved
     if (!p.motif || planned[bar]?.melody !== 'sparse' || (p.fixed && planned[bar].role !== 'cadence')) return p;
     const head = p.motif.filter((n) => n.step < 8);
     if (head.length < 2 || head.length === p.motif.length) return p;
-    // A response that differs only in its tail keeps it, or the answer would be lost.
-    if (p.role === 'response' && headOf(p.motif) === headOf(bars[bar - 1]?.motif)) return p;
     const last = head[head.length - 1];
     const held = { ...last, len: Math.max(last.len, Math.min(maxLen + 2, 10 - last.step)) };
+    // A response that differs from its call only in the tail lands its held note where the full
+    // answer would have ended, so the answer isn't lost. If that's the same note, it plays in full.
+    if (p.role === 'response' && headOf(p.motif) === headOf(bars[bar - 1]?.motif)) {
+      const landing = p.motif[p.motif.length - 1].deg;
+      return landing === last.deg ? p : { ...p, motif: tidy([...head.slice(0, -1), { ...held, deg: landing }]) };
+    }
     return { ...p, motif: tidy([...head.slice(0, -1), held]) };
   });
 }
