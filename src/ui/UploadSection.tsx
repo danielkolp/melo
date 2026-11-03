@@ -5,11 +5,11 @@ import { keyLabel } from '../core/theory';
 import { totalTicks, type ImportSource, type StyleId, type TrackId } from '../core/types';
 import { makeVariations, type Variation } from '../core/variations';
 import { canDragOut, dragOut } from '../lib/dragMidi';
-import { exportTakes, takeFile, takesFile } from '../lib/exportMidi';
+import { exportTakes, takesFile } from '../lib/exportMidi';
 import { studio, useComposition, useStudio } from '../state/useStudio';
 import { TRACK_COLORS, TRACK_LABELS } from '../theme';
-import { Group, Segmented, Slider, cx } from './controls';
-import { NoteSketch } from './NoteSketch';
+import { Group, Segmented, Slider } from './controls';
+import { TakeCard } from './TakeCard';
 
 function amountLabel(amount: number): string {
   if (amount < 0.25) return 'subtle';
@@ -68,11 +68,30 @@ function Takes({ source, track, style, onTrack }: { source: ImportSource; track:
         />
       )}
 
-      <TakeCard take={original} track={track} index={0} picked={picked === 0} ticks={ticks} color={color} onPick={pick} wide />
+      <TakeCard
+        take={original}
+        track={track}
+        index={0}
+        picked={picked === 0}
+        ticks={ticks}
+        color={color}
+        what="The part as uploaded"
+        onPick={() => pick(0)}
+        wide
+      />
       <ol className="mt-1.5 grid grid-cols-2 gap-1.5" aria-label={`${TRACK_LABELS[track]} variations`}>
         {cards.map((card, i) => (
           <li key={`${source.variationSeed}-${i}`}>
-            <TakeCard take={card} track={track} index={i + 1} picked={picked === i + 1} ticks={ticks} color={color} onPick={pick} />
+            <TakeCard
+              take={card}
+              track={track}
+              index={i + 1}
+              picked={picked === i + 1}
+              ticks={ticks}
+              color={color}
+              what={`Variation ${i + 1}: ${card.label}`}
+              onPick={() => pick(i + 1)}
+            />
           </li>
         ))}
       </ol>
@@ -109,39 +128,5 @@ function Takes({ source, track, style, onTrack }: { source: ImportSource; track:
         </button>
       </div>
     </Group>
-  );
-}
-
-interface CardProps {
-  take: Variation;
-  track: TrackId;
-  index: number;
-  picked: boolean;
-  ticks: number;
-  color: string;
-  wide?: boolean;
-  onPick(index: number): void;
-}
-
-function TakeCard({ take, track, index, picked, ticks, color, wide, onPick }: CardProps) {
-  const what = index ? `Variation ${index}: ${take.label}` : 'The part as uploaded';
-  return (
-    <button
-      type="button"
-      aria-pressed={picked}
-      onClick={() => onPick(index)}
-      title={canDragOut ? `${what}. Drag it into your DAW to drop in this take alone.` : what}
-      {...dragOut(() => takeFile(track, take, index), { label: index ? `${index} · ${take.label}` : 'Original', color })}
-      className={cx(
-        'group flex w-full flex-col gap-1.5 rounded-lg p-2 text-left transition-colors duration-150',
-        picked ? 'bg-tint ring-1 ring-line-strong' : 'bg-well hover:bg-tint',
-      )}
-    >
-      <NoteSketch notes={take.notes} ticks={ticks} color={color} className={cx('w-full rounded-[3px] bg-panel', wide ? 'h-10' : 'h-9')} />
-      <span className={cx('flex items-start gap-1.5 text-[11.5px] leading-snug', !wide && 'min-h-[2lh]')}>
-        {index > 0 && <span className="readout mt-px text-[9.5px] text-fg-faint">{index}</span>}
-        <span className={cx('line-clamp-2', picked ? 'text-fg' : 'text-fg-dim group-hover:text-fg')}>{take.label}</span>
-      </span>
-    </button>
   );
 }

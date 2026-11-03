@@ -236,7 +236,7 @@ export function colourProgression(settings: CompositionSettings, chords: Chord[]
   const c = settings.creativity;
   if (c <= 0) return chords;
   const h: Harmony = {
-    rng: createRng(deriveSeed(settings.seed, 'colour')),
+    rng: createRng(deriveSeed(settings.harmonySeed ?? settings.seed, 'colour')),
     settings,
     flavour: FLAVOUR[settings.style],
     keyScale: harmonyPitchClasses(settings.key, settings.scale),

@@ -11,7 +11,8 @@ import {
   updateSection,
 } from '../core/arrangement';
 import { addNote, createNoteId, findNote, removeNote, updateNote, type NotePatch } from '../core/edit';
-import { composeAround, heldFor, loadHeld, loadTake } from '../core/importing';
+import { composeAround, loadHeld, loadTake } from '../core/importing';
+import { newChords, recompose, rewriteBar, toggleBarLock, toggleLock } from '../core/locks';
 import {
   createSettings,
   generateComposition,
@@ -42,7 +43,7 @@ export type ViewMode = 'iso' | 'top' | 'explore';
 export type SidebarTab = 'tracks' | 'composition' | 'sound';
 /** Loop plays the pattern; Song plays the arrangement start to finish. */
 export type PlayMode = 'loop' | 'song';
-export type SectionPatch = Partial<Pick<SongSection, 'kind' | 'bars' | 'drums' | 'filter'>>;
+export type SectionPatch = Partial<Pick<SongSection, 'kind' | 'bars' | 'drums' | 'filter' | 'material'>>;
 
 /** Settings that change the music itself; changing them regenerates from the current seeds. */
 export type MusicalPatch = Partial<Pick<CompositionSettings, 'key' | 'scale' | 'bars' | 'density' | 'variation' | 'creativity' | 'phrase' | 'transition'>>;
@@ -88,8 +89,17 @@ export interface StudioState {
   /** The file shown in the import dialog, if it's open. */
   pendingImport: PendingImport | null;
 
+  /** A new loop from a new seed. Locked parts and bars stay. */
   generate(seed?: number): void;
   regenerateTrack(track: TrackId, seed?: number): void;
+  /** Locks a part against Generate and changes to the music, or unlocks it. */
+  toggleLock(track: TrackId): void;
+  /** Locks a bar's notes, in every part, or unlocks it. */
+  toggleBarLock(bar: number): void;
+  /** Writes one bar of one part again as a related alternative. */
+  rewriteBar(track: TrackId, bar: number, seed?: number): void;
+  /** A new progression under the loop. */
+  newChords(seed?: number): void;
   changeMusic(patch: MusicalPatch, coalesceKey?: string): void;
   setStyle(style: StyleId): void;
   setTempo(bpm: number): void;
@@ -181,13 +191,8 @@ export function createStudioStore(init: StudioInit = {}) {
       });
     };
     const present = () => get().history.present;
-    /** A new loop for `settings`, written around any uploaded parts. */
-    const compose = (settings: CompositionSettings) => {
-      const comp = present();
-      return comp.source
-        ? composeAround(settings, comp.source, heldFor(comp, settings), comp.automation, comp.arrangement)
-        : generateComposition(settings, comp.automation, comp.arrangement);
-    };
+    /** A new loop for `settings`, written around uploaded and locked parts and, with `keepEdited`, hand-edited ones. */
+    const compose = (settings: CompositionSettings, keepEdited = false) => recompose(present(), settings, { keepEdited });
     /** Commits a change to the upload's variation settings; the loop keeps playing what it has. */
     const reshuffle = (patch: Partial<ImportSource>, coalesceKey?: string) => {
       const comp = present();
@@ -228,7 +233,9 @@ export function createStudioStore(init: StudioInit = {}) {
 
       generate(seed = random()) {
         const comp = present();
-        const settings = { ...comp.settings, seed, trackSeeds: trackSeedsFor(seed), automationSeed: deriveSeed(seed, 'automation') };
+        // A new seed brings new harmony too, unless something locked holds it.
+        const { harmonySeed: _, ...current } = comp.settings;
+        const settings = { ...current, seed, trackSeeds: trackSeedsFor(seed), automationSeed: deriveSeed(seed, 'automation') };
         apply(compose(settings));
       },
 
@@ -236,11 +243,32 @@ export function createStudioStore(init: StudioInit = {}) {
         apply(regenerateTrack(present(), track, seed));
       },
 
+      toggleLock(track) {
+        apply(toggleLock(present(), track));
+      },
+
+      toggleBarLock(bar) {
+        apply(toggleBarLock(present(), bar));
+      },
+
+      rewriteBar(track, bar, seed = random()) {
+        const comp = present();
+        const next = rewriteBar(comp, track, bar, seed);
+        if (next !== comp) apply(next);
+      },
+
+      newChords(seed = random()) {
+        const comp = present();
+        const next = newChords(comp, seed);
+        if (next !== comp) apply(next);
+      },
+
       changeMusic(patch, coalesceKey) {
         const current = present().settings;
-        const changed = (Object.keys(patch) as (keyof MusicalPatch)[]).some((k) => patch[k] !== current[k]);
-        if (!changed) return;
-        apply(compose({ ...current, ...patch }), coalesceKey);
+        const keys = (Object.keys(patch) as (keyof MusicalPatch)[]).filter((k) => patch[k] !== current[k]);
+        if (!keys.length) return;
+        // Moving key keeps hand edits, moved with it; anything else writes the unlocked parts again.
+        apply(compose({ ...current, ...patch }, keys.every((k) => k === 'key' || k === 'scale')), coalesceKey);
       },
 
       setStyle(style) {

@@ -1,9 +1,11 @@
-import { ChevronRight, Dices, Drum, FileMusic } from 'lucide-react';
-import { useEffect, useState, type ReactNode } from 'react';
+import { ChevronRight, Dices, Drum, FileMusic, Lock, LockOpen } from 'lucide-react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { PATCHES, autoPatch, patchesFor, resolvePatch, type PatchId } from '../audio/patches';
-import { previewSound } from '../audio/playback';
+import { previewSound, togglePlayback } from '../audio/playback';
 import { BRASS_ENTRIES, BRASS_KINDS, brassPlan } from '../core/brass';
 import { REGISTERS, chordAt } from '../core/generator';
+import { canChangeChords } from '../core/locks';
+import { topTakes } from '../core/takes';
 import { formatSeed, parseSeed } from '../core/random';
 import { STYLES, STYLE_IDS } from '../core/styles';
 import {
@@ -26,6 +28,7 @@ import { TRACK_COLORS, TRACK_LABELS } from '../theme';
 import { AutomationSection } from './AutomationSection';
 import { Group, IconButton, Segmented, Select, Slider, Switch, cx } from './controls';
 import { PhrasingSection } from './PhrasingSection';
+import { TakeCard } from './TakeCard';
 import { UploadSection } from './UploadSection';
 import { usePlaybackTicks } from './usePlaybackTicks';
 
@@ -91,12 +94,13 @@ function TracksTab() {
     <>
       <UploadSection />
       <PartsGroup />
+      <TakesGroup />
     </>
   );
 }
 
 function PartsGroup() {
-  const { notes, source, settings } = useComposition();
+  const { notes, source, settings, locks, edited } = useComposition();
   const brass = brassPlan(settings);
   const muted = useStudio((s) => s.muted);
   const active = useStudio((s) => s.activeTrack);
@@ -107,6 +111,9 @@ function PartsGroup() {
         {TRACK_IDS.map((track, i) => {
           const count = notes.filter((n) => n.track === track).length;
           const isActive = track === active;
+          const locked = !!locks?.tracks.includes(track);
+          const touched = !!edited?.includes(track) && !held.has(track);
+          const name = TRACK_LABELS[track].toLowerCase();
           return (
             <li
               key={track}
@@ -134,10 +141,12 @@ function PartsGroup() {
                     // What this loop's brass does, in place of its range.
                     <span className="readout block text-[10px] text-fg-faint" title={`${count} notes`}>
                       {BRASS_KINDS[brass.kind]} · {BRASS_ENTRIES[brass.entry]}
+                      {touched && ' · edited'}
                     </span>
                   ) : (
                     <span className="readout block text-[10px] text-fg-faint">
                       {noteName(REGISTERS[track].low)}–{noteName(REGISTERS[track].high)} · {count} notes
+                      {touched && ' · edited'}
                     </span>
                   )}
                 </span>
@@ -164,13 +173,25 @@ function PartsGroup() {
                   yours
                 </span>
               ) : (
-                <IconButton
-                  size="sm"
-                  label={`Regenerate ${TRACK_LABELS[track].toLowerCase()}`}
-                  onClick={() => studio.getState().regenerateTrack(track)}
-                >
-                  <Dices size={15} strokeWidth={1.6} />
-                </IconButton>
+                <>
+                  <IconButton
+                    size="sm"
+                    active={locked}
+                    aria-pressed={locked}
+                    label={locked ? `Unlock the ${name}` : `Lock the ${name}: Generate and changes to the music leave it as it is`}
+                    onClick={() => studio.getState().toggleLock(track)}
+                  >
+                    {locked ? <Lock size={14} strokeWidth={1.7} /> : <LockOpen size={14} strokeWidth={1.6} />}
+                  </IconButton>
+                  <IconButton
+                    size="sm"
+                    label={locked ? `The ${name} is locked` : `Regenerate ${name}`}
+                    disabled={locked}
+                    onClick={() => studio.getState().regenerateTrack(track)}
+                  >
+                    <Dices size={15} strokeWidth={1.6} />
+                  </IconButton>
+                </>
               )}
               <Switch
                 label={`${muted[track] ? 'Unmute' : 'Mute'} ${TRACK_LABELS[track].toLowerCase()}`}
@@ -183,11 +204,47 @@ function PartsGroup() {
         })}
       </ul>
       <p className="mt-3 text-[12px] leading-relaxed text-fg-faint">
-        Pick a part (or press 1–5) to draw into it, then double-click the grid. The dice rewrite one part and leave the rest.{' '}
+        Pick a part (or press 1–5) to draw into it, then double-click the grid. The dice rewrite one part and leave the rest; the lock keeps a
+        part through Generate. Parts you edit by hand stay when another part is rewritten.{' '}
         {canDragOut
           ? 'Drag a part’s file icon onto a track in Ableton or any DAW to drop in just that part.'
           : 'The file icon saves just that part as a .mid.'}
       </p>
+    </Group>
+  );
+}
+
+/** Other takes on the active melody or bass, best first. Click one to load it (undoable); drag one into a DAW. */
+function TakesGroup() {
+  const composition = useComposition();
+  const track = useStudio((s) => s.activeTrack);
+  const playing = useStudio((s) => s.isPlaying);
+  const takes = useMemo(() => topTakes(composition, track), [composition, track]);
+  if (!takes.length) return null;
+  const color = TRACK_COLORS[track];
+  const name = TRACK_LABELS[track].toLowerCase();
+  return (
+    <Group title={`${TRACK_LABELS[track]} takes`}>
+      <ol className="grid grid-cols-2 gap-1.5" aria-label={`Other takes on the ${name}`}>
+        {takes.map((take, i) => (
+          <li key={take.seed}>
+            <TakeCard
+              take={take}
+              track={track}
+              index={i + 1}
+              picked={false}
+              ticks={totalTicks(composition.settings.bars)}
+              color={color}
+              what={`Take ${i + 1} on the ${name}: ${take.label.toLowerCase()}. Click to load it; undo brings this one back`}
+              onPick={() => {
+                studio.getState().regenerateTrack(track, take.seed);
+                if (!playing) void togglePlayback();
+              }}
+            />
+          </li>
+        ))}
+      </ol>
+      <p className="mt-2 text-[12px] leading-relaxed text-fg-faint">Ranked by how well each holds together and sits in the groove. Trust your ears over the order.</p>
     </Group>
   );
 }
@@ -297,7 +354,10 @@ function KeyPicker() {
 }
 
 function HarmonyGroup() {
-  const { settings, progression } = useComposition();
+  const composition = useComposition();
+  const { settings, progression } = composition;
+  const changeable = canChangeChords(composition);
+  const keepsMelody = !!(composition.locks?.tracks.includes('melody') || composition.edited?.includes('melody') || composition.source?.parts.some((p) => p.track === 'melody'));
   const flats = prefersFlats(settings.key, settings.scale);
   const ticks = usePlaybackTicks();
   const playing = useStudio((s) => s.isPlaying);
@@ -325,6 +385,22 @@ function HarmonyGroup() {
           </li>
         ))}
       </ol>
+      <button
+        type="button"
+        disabled={!changeable}
+        onClick={() => studio.getState().newChords()}
+        title={
+          !changeable
+            ? 'The chords or bass are locked or uploaded, so the harmony stays'
+            : keepsMelody
+              ? 'A new progression that suits your melody; the other parts are written again over it'
+              : 'A new progression; every unlocked part is written again over it'
+        }
+        className="mt-2.5 flex h-8 items-center justify-center gap-1.5 rounded-full bg-well px-3 text-[12.5px] text-fg transition-colors hover:bg-tint disabled:pointer-events-none disabled:opacity-40 w-full"
+      >
+        <Dices size={14} strokeWidth={1.7} />
+        New chords
+      </button>
     </Group>
   );
 }

@@ -8,6 +8,12 @@ import { PPQ, TRACK_IDS, totalTicks, type Composition } from './types';
 
 const straight = (overrides = {}) => generateComposition(createSettings({ seed: 11, swing: 50, ...overrides }));
 
+/** Where a note lands in a straight export: its nudge moves both ends, and nothing starts before 0. */
+const played = (n: { start: number; duration: number; nudge?: number }) => {
+  const on = Math.max(0, n.start + (n.nudge ?? 0));
+  return { ticks: on, durationTicks: Math.max(on + 1, n.start + n.duration + (n.nudge ?? 0)) - on };
+};
+
 describe('encodeVlq', () => {
   it.each([
     [0, [0x00]],
@@ -76,7 +82,7 @@ describe('compositionToMidi', () => {
       expect(track.instrument.number).toBe(TRACK_MIDI[id].program);
       const expected = composition.notes
         .filter((n) => n.track === id)
-        .map((n) => ({ midi: n.pitch, ticks: n.start, durationTicks: n.duration, velocity: n.velocity }))
+        .map((n) => ({ midi: n.pitch, ...played(n), velocity: n.velocity }))
         .sort((a, b) => a.ticks - b.ticks || a.midi - b.midi);
       const actual = track.notes
         .map((n) => ({ midi: n.midi, ticks: n.ticks, durationTicks: n.durationTicks, velocity: Math.round(n.velocity * 127) }))
@@ -119,7 +125,7 @@ describe('compositionToMidi', () => {
 
   it('bakes swing into note timing by default and can export straight', () => {
     const composition = generateComposition(createSettings({ seed: 3, style: 'ukg', swing: 62 }));
-    const offbeat = composition.notes.find((n) => (n.start / (PPQ / 4)) % 2 === 1)!;
+    const offbeat = composition.notes.find((n) => (n.start / (PPQ / 4)) % 2 === 1 && !n.nudge)!;
     expect(offbeat).toBeDefined();
 
     const swung = new Midi(compositionToMidi(composition)).tracks.flatMap((t) => t.notes);

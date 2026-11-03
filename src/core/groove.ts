@@ -34,7 +34,8 @@ export function unswingTick(tick: number, swing: number): number {
   return base + STEP + ((p - mid) * STEP) / (STEP - offset);
 }
 
-/** Swung start and end of a note, in ticks. */
-export function swungSpan(start: number, duration: number, swing: number): { start: number; end: number } {
-  return { start: swingTick(start, swing), end: swingTick(start + duration, swing) };
+/** Swung start and end of a note, in ticks, moved by its nudge off the grid. */
+export function swungSpan(start: number, duration: number, swing: number, nudge = 0): { start: number; end: number } {
+  const on = Math.max(0, swingTick(start, swing) + nudge);
+  return { start: on, end: Math.max(on + 1, swingTick(start + duration, swing) + nudge) };
 }

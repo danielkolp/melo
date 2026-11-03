@@ -89,12 +89,14 @@ export function nearestWhere(pool: readonly number[], index: number, dir: number
 
 /**
  * Moves a pitch onto the chord's own scale when it brings one (a borrowed chord or a secondary
- * dominant), a semitone toward one of its tones where possible; otherwise leaves it.
+ * dominant), a semitone toward one of its tones where possible, inside `range` if given;
+ * otherwise leaves it.
  */
-export function fitToChord(pitch: number, chord: Chord): number {
+export function fitToChord(pitch: number, chord: Chord, range?: { low: number; high: number }): number {
   const { scale, tones } = chord;
   if (!scale || scale.includes(pc(pitch))) return pitch;
-  const options = [pitch - 1, pitch + 1].filter((p) => scale.includes(pc(p)));
+  // Never a semitone out of the part's range.
+  const options = [pitch - 1, pitch + 1].filter((p) => scale.includes(pc(p)) && (!range || (p >= range.low && p <= range.high)));
   return options.find((p) => tones.includes(pc(p))) ?? options[0] ?? pitch;
 }
 

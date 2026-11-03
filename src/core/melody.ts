@@ -15,9 +15,12 @@ import {
   vary,
   type ContourKind,
   type Motif,
+  type MotifNote,
 } from './motif';
+import { makePlan, type BarPlan as Planned } from './plan';
+import { pickTake, scoreMelody } from './score';
 import { createRng, deriveSeed, type Rng } from './random';
-import { REGISTERS, chordAt, clamp, fitToChord, nearestIndex, noteId, onsetProfile, pc, snapToChordTone, velocity } from './shared';
+import { REGISTERS, chordAt, clamp, fitToChord, nearestIndex, noteId, pc, snapToChordTone, velocity } from './shared';
 import { STYLES, type StyleDef } from './styles';
 import { SCALES, pitchesInRange, scalePitchClasses } from './theory';
 import {
@@ -68,7 +71,8 @@ const AUTO_FORMS: Record<StyleId, [ResolvedForm, number][]> = {
   rap: [['hook', 3.5], ['callResponse', 2.5], ['questionAnswer', 2], ['sequence', 1], ['trade', 1]],
 };
 
-const HOOK_CONTOURS: ContourKind[] = ['pedal', 'repeat', 'octave', 'turn'];
+/** Hook shapes, weighted: the anchored vocal-chop figure leads. */
+const HOOK_CONTOURS: [ContourKind, number][] = [['anchor', 2], ['pedal', 1], ['repeat', 1], ['octave', 1], ['turn', 1]];
 
 /** How often a hook is a two-bar riff, against one of the contours above. */
 const RIFF: Record<StyleId, number> = { ukg: 1.5, house: 3, deepHouse: 1.5, melodicHouse: 0.7, rap: 1.5 };
@@ -100,12 +104,14 @@ interface Ctx {
   /** Scale steps per octave (7, or 5 for pentatonics). */
   octave: number;
   centre: number;
-  /** How often the parts already written start a note on each sixteenth: the rhythm the melody leans on. */
-  groove?: readonly number[];
 }
 
+/**
+ * A new motif. It depends only on the style, the density and the melody's own seed, not on the
+ * notes of the other parts, so the idea survives new chords or a new bassline.
+ */
 const fresh = (ctx: Ctx, density = ctx.settings.density, contour?: ContourKind, avoid?: ReadonlySet<number>) =>
-  makeMotif(ctx.rng, ctx.style, density, ctx.octave, { contour, avoid, creativity: ctx.settings.creativity, groove: ctx.groove });
+  makeMotif(ctx.rng, ctx.style, density, ctx.octave, { contour, avoid, creativity: ctx.settings.creativity });
 
 const sameShape = (a: Motif, b: Motif) => JSON.stringify(a) === JSON.stringify(b);
 
@@ -119,8 +125,9 @@ export function respond(ctx: Ctx, call: Motif): Motif {
     [() => fragment(call, rng.pick([-1, 1, 2])), 1.5],
     [() => augment(call), call.length >= 5 ? 2 : 0.4],
     [() => displace(call, 2), 1.2],
-    [() => fresh(ctx, ctx.settings.density * 0.85, undefined, callSteps), 2.5],
-    [() => newTail(call, fresh(ctx), rng.pick([-1, 1])), 1.5],
+    // Mostly made from the call; a new idea only now and then.
+    [() => fresh(ctx, ctx.settings.density * 0.85, undefined, callSteps), 0.5],
+    [() => newTail(call, fresh(ctx), rng.pick([-1, 1])), 2.5],
     // Rhythmic surprises, as creativity rises.
     [() => syncopate(call), 1.2 * ctx.settings.creativity],
     [() => ornament(call, rng), ctx.settings.creativity],
@@ -146,13 +153,14 @@ function plan(ctx: Ctx, form: ResolvedForm, final: boolean): BarPlan[] {
       return [
         { role: 'call', voice: 'melody', motif: call, start: { at: centre }, ending: 'open', accent: 2 },
         { role: 'response', voice, motif: r1, start: { follow: away(call) }, ending: 'open', accent: -6 },
-        { role: 'call', voice: 'melody', motif: vary(call, rng, v * 0.8), start: { at: centre }, ending: 'open', accent: 2 },
+        // The call comes back a step or two higher: the phrase's push before it settles.
+        { role: 'call', voice: 'melody', motif: vary(call, rng, v * 0.8), start: { at: centre + rng.pick([1, 2]) }, ending: 'open', accent: 2 },
         { role: 'response', voice, motif: r2, start: { follow: away(call) }, ending: close, accent: -4 },
       ];
     }
     case 'hook': {
-      const kinds = [...HOOK_CONTOURS, 'riff' as const];
-      const contour = rng.weighted(kinds, kinds.map((k) => (k === 'riff' ? RIFF[settings.style] : 1)));
+      const kinds = [...HOOK_CONTOURS, ['riff', RIFF[settings.style]] as [ContourKind, number]];
+      const contour = rng.weighted(kinds.map(([k]) => k), kinds.map(([, w]) => w));
       const a = fresh(ctx, settings.density, contour);
       if (contour === 'riff') {
         // A two-bar riff played twice: the second bar keeps the rhythm and answers on one note a
@@ -173,13 +181,15 @@ function plan(ctx: Ctx, form: ResolvedForm, final: boolean): BarPlan[] {
       return [
         { role: 'hook', voice: 'melody', motif: a, start: { at: centre }, ending: null, accent: 0 },
         { role: 'hook', voice: 'melody', motif: b, start: { at: centre }, ending: null, accent: -2 },
-        { role: 'hook', voice: 'melody', motif: vary(a, rng, v * 0.6), start: { at: centre }, ending: null, accent: 0 },
+        // The third time round it may lift a step or two, so the hook builds before the turnaround.
+        { role: 'hook', voice: 'melody', motif: vary(a, rng, v * 0.6), start: { at: centre + (rng.chance(0.6) ? rng.pick([1, 2]) : 0) }, ending: null, accent: 0 },
         { role: 'hook', voice: 'melody', motif: end, start: { at: centre }, ending: final ? 'closed' : null, accent: -2 },
       ];
     }
     case 'questionAnswer': {
       const a = fresh(ctx);
-      const b = fresh(ctx, settings.density * 0.8);
+      // The second half of the question starts like the first and turns somewhere new.
+      const b = newTail(a, fresh(ctx, settings.density * 0.8), rng.pick([-1, 1]));
       return [
         { role: 'question', voice: 'melody', motif: a, start: { at: centre }, ending: null, accent: 2 },
         { role: 'question', voice: 'melody', motif: b, start: { follow: rng.pick([-1, 1]) }, ending: 'open', accent: 0 },
@@ -282,24 +292,52 @@ export function realise(
   while (base + lo < 0 && base + hi + octave <= pool.length - 1) base += octave;
   while (base + hi > pool.length - 1 && base + lo - octave >= 0) base -= octave;
 
-  const notes: Realised[] = [];
-  let index = clamp(base, 0, pool.length - 1);
+  // The whole figure slides along the scale to where it sits best on the bar's harmony, so it keeps
+  // its intervals (its identity) instead of being bent note by note onto each chord.
+  const tickOf = (n: MotifNote) => barStart + n.step * STEP;
+  const isTone = (idx: number, tick: number) => chordAt(progression, tick).tones.includes(pc(pool[clamp(idx, 0, pool.length - 1)]));
+  const weight = (n: MotifNote) => (n.step % 8 === 0 ? 2 : n.step % 4 === 0 ? 1 : 0.3) * Math.min(2, n.len / 2 + 0.5);
+  let shift = 0;
+  let bestCost = Infinity;
+  for (const s of [0, -1, 1, -2, 2]) {
+    if (base + lo + s < 0 || base + hi + s > pool.length - 1) continue;
+    const cost = motif.reduce((a, n) => a + (isTone(base + s + n.deg, tickOf(n)) ? 0 : weight(n)), 0) + Math.abs(s) * 0.75;
+    if (cost < bestCost) [shift, bestCost] = [s, cost];
+  }
+  base += shift;
+
+  const idx = motif.map((n) => clamp(base + n.deg, 0, pool.length - 1));
+  // A repeated note stays repeated: that's the groove.
   motif.forEach((n, i) => {
-    const tick = barStart + n.step * STEP;
-    const chord = chordAt(progression, tick);
-    let idx = clamp(base + n.deg, 0, pool.length - 1);
-    const strong = n.step % 8 === 0;
-    const dir = Math.sign(n.deg - (motif[i - 1]?.deg ?? n.deg));
-    // A repeated note stays repeated (that's the groove), unless it would sit off the chord on beat 1 or 3.
-    const repeat = i > 0 && motif[i - 1].deg === n.deg && (!strong || chord.tones.includes(pc(pool[index])));
-    if (repeat) idx = index;
-    // Other beats land on chord tones, so the same motif over the same chord always comes out the same.
-    else if (n.step % 4 === 0) idx = snapToChordTone(pool, chord.tones, idx, dir);
-    if (ending && i === motif.length - 1) idx = endingIndex(pool, chord, settings.key, idx, ending, strong);
-    index = idx;
-    notes.push({ tick, len: n.len, pitch: pool[idx], strong });
+    if (i > 0 && motif[i - 1].deg === n.deg) idx[i] = idx[i - 1];
   });
-  return { notes, lastIndex: index };
+  motif.forEach((n, i) => {
+    const tick = tickOf(n);
+    const chord = chordAt(progression, tick);
+    if (ending && i === motif.length - 1) {
+      idx[i] = endingIndex(pool, chord, settings.key, idx[i], ending, n.step % 8 === 0);
+      return;
+    }
+    // A note on beat 1 or 3, or a long one, is a chord tone, or a suspension the next note
+    // resolves by step onto one. Short notes in between may pass or turn freely.
+    const structural = n.step % 8 === 0 || n.len >= 4;
+    if (!structural || isTone(idx[i], tick)) return;
+    const next = motif[i + 1];
+    const resolves =
+      !!next &&
+      next.step <= n.step + n.len + 1 &&
+      Math.abs(pool[idx[i + 1]] - pool[idx[i]]) <= 2 &&
+      isTone(idx[i + 1], tickOf(next)) &&
+      !(ending && i + 1 === motif.length - 1);
+    if (resolves) return;
+    const dir = Math.sign(n.deg - (motif[i - 1]?.deg ?? n.deg));
+    const was = idx[i];
+    idx[i] = snapToChordTone(pool, chord.tones, idx[i], dir);
+    // Repeats of it move with it.
+    for (let k = i + 1; k < motif.length && motif[k].deg === n.deg && idx[k] === was; k++) idx[k] = idx[i];
+  });
+  const notes: Realised[] = motif.map((n, i) => ({ tick: tickOf(n), len: n.len, pitch: pool[idx[i]], strong: n.step % 8 === 0 }));
+  return { notes, lastIndex: idx[idx.length - 1] ?? clamp(base, 0, pool.length - 1) };
 }
 
 export function melodyPool(settings: CompositionSettings, track: 'melody' | 'counter' = 'melody'): number[] {
@@ -336,7 +374,7 @@ function embellish(notes: NoteEvent[], ctx: Ctx, rng: Rng, pickup: boolean, role
   const c = settings.creativity;
   const { low, high } = REGISTERS.melody;
   const flourish = FLOURISH[settings.style];
-  for (const n of notes) n.pitch = fitToChord(n.pitch, chordAt(progression, n.start));
+  for (const n of notes) n.pitch = fitToChord(n.pitch, chordAt(progression, n.start), REGISTERS.melody);
   if (c <= 0) return notes;
 
   // Decided once per place in the phrase, so a repeated bar is decorated the same way each time.
@@ -349,10 +387,12 @@ function embellish(notes: NoteEvent[], ctx: Ctx, rng: Rng, pickup: boolean, role
     }
     return decided.get(key);
   };
+  const suspended = (n: NoteEvent) => n.start % (STEP * 8) === 0 && !chordAt(progression, n.start).tones.includes(pc(n.pitch));
   notes.forEach((n, i) => {
     const prev = notes[i - 1];
     const next = notes[i + 1];
-    if (!prev || !next || onBeat(n) || n.duration > STEP * 2) return;
+    // A note resolving a suspension is where it has to be.
+    if (!prev || !next || onBeat(n) || n.duration > STEP * 2 || suspended(prev)) return;
     if (onBeat(next) && next.start - (n.start + n.duration) <= STEP) {
       const side = decide(n, true);
       const from = next.pitch + (side === 'below' ? -1 : 1);
@@ -371,7 +411,7 @@ function embellish(notes: NoteEvent[], ctx: Ctx, rng: Rng, pickup: boolean, role
   const final = chordAt(progression, end - STEP);
   const at = nearestIndex(pool, first.pitch);
   for (const dir of rng.chance(0.5) ? [1, -1] : [-1, 1]) {
-    const path = [3, 2, 1].map((k) => fitToChord(pool[clamp(at - dir * k, 0, pool.length - 1)], final));
+    const path = [3, 2, 1].map((k) => fitToChord(pool[clamp(at - dir * k, 0, pool.length - 1)], final, REGISTERS.melody));
     if (!final.tones.slice(0, 3).includes(pc(path[2])) || path[2] === first.pitch) continue;
     path.forEach((pitch, i) =>
       notes.push({
@@ -407,22 +447,37 @@ function anticipate(notes: NoteEvent[], rng: Rng, chance: number, roleAt: (bar: 
   }
 }
 
-/** `around`: parts already written, whose rhythm the melody leans on. */
-export function generateMelody(
-  settings: CompositionSettings,
-  progression: readonly Chord[],
-  around: readonly NoteEvent[] = [],
-): { notes: NoteEvent[]; phrasing: Phrasing } {
+/**
+ * Where the shared plan leaves space, the bar plays only its idea's head and holds its last note,
+ * and the counter-melody takes the back half. A riff keeps its shape and breathes only at the
+ * cadence; a trade, a sequence and an arc carry their own shape.
+ */
+function leaveSpace(bars: BarPlan[], planned: readonly Planned[], form: ResolvedForm, maxLen: number): BarPlan[] {
+  if (form === 'trade' || form === 'sequence' || form === 'arc') return bars;
+  const headOf = (motif: Motif | null | undefined) => JSON.stringify(motif?.filter((n) => n.step < 8).map((n) => [n.step, n.deg]));
+  return bars.map((p, bar) => {
+    if (!p.motif || planned[bar]?.melody !== 'sparse' || (p.fixed && planned[bar].role !== 'cadence')) return p;
+    const head = p.motif.filter((n) => n.step < 8);
+    if (head.length < 2 || head.length === p.motif.length) return p;
+    // A response that differs only in its tail keeps it, or the answer would be lost.
+    if (p.role === 'response' && headOf(p.motif) === headOf(bars[bar - 1]?.motif)) return p;
+    const last = head[head.length - 1];
+    const held = { ...last, len: Math.max(last.len, Math.min(maxLen + 2, 10 - last.step)) };
+    return { ...p, motif: tidy([...head.slice(0, -1), held]) };
+  });
+}
+
+/** One take of the melody, from the melody seed alone. */
+function writeMelody(settings: CompositionSettings, progression: readonly Chord[]): { notes: NoteEvent[]; phrasing: Phrasing } {
   const seed = settings.trackSeeds.melody;
   const rng = createRng(seed);
   const style = STYLES[settings.style];
   const pool = melodyPool(settings);
   const octave = SCALES[settings.scale].intervals.length;
   const centre = nearestIndex(pool, rng.int(67, 74));
-  const groove = around.length ? onsetProfile(around, settings.bars) : undefined;
-  const ctx: Ctx = { rng, style, settings, progression, pool, octave, centre, groove };
+  const ctx: Ctx = { rng, style, settings, progression, pool, octave, centre };
   const form = resolveForm(settings);
-  const bars = planBars(ctx, form);
+  const bars = leaveSpace(planBars(ctx, form), makePlan(settings).bars, form, style.melodyMaxLen);
 
   const notes: NoteEvent[] = [];
   let lastIndex = centre;
@@ -457,6 +512,31 @@ export function generateMelody(
     sections: bars.map((p, bar) => ({ start: bar * TICKS_PER_BAR, duration: TICKS_PER_BAR, role: p.role, voice: p.voice })),
   };
   return { notes, phrasing };
+}
+
+/** Melody takes written for each loop; the one that scores best is kept. */
+export const MELODY_TAKES = 6;
+
+export interface MelodyTake {
+  notes: NoteEvent[];
+  phrasing: Phrasing;
+  score: number;
+}
+
+/** The takes a melody is chosen from: the seed's own, then ones from seeds derived from it, all in the seed's phrase form. */
+export function melodyTakes(settings: CompositionSettings, progression: readonly Chord[]): MelodyTake[] {
+  const phrase = resolveForm(settings);
+  return Array.from({ length: MELODY_TAKES }, (_, i) => {
+    const melody = i ? deriveSeed(settings.trackSeeds.melody, `take${i}`) : settings.trackSeeds.melody;
+    const take = writeMelody({ ...settings, phrase, trackSeeds: { ...settings.trackSeeds, melody } }, progression);
+    return { ...take, score: scoreMelody(take.notes, progression, settings) };
+  });
+}
+
+/** The melody for a loop: the best-scoring of its takes. Same seed and harmony, same melody. */
+export function generateMelody(settings: CompositionSettings, progression: readonly Chord[]): { notes: NoteEvent[]; phrasing: Phrasing } {
+  const best = pickTake(melodyTakes(settings, progression));
+  return { notes: best.notes, phrasing: best.phrasing };
 }
 
 /** Turns played notes back into a motif, measured in steps of `pool`. */

@@ -3,9 +3,10 @@ import type { ScaleId, StyleId } from './types';
 
 /**
  * Which chord tone a bass hit plays. `approach` steps into the next chord's root from the scale;
- * `chromatic` slides into it from a semitone away.
+ * `chromatic` slides into it from a semitone away; `ghost` is the root, short and quiet, leading
+ * into the next hit.
  */
-export type BassTone = 'root' | 'octave' | 'fifth' | 'approach' | 'chromatic';
+export type BassTone = 'root' | 'octave' | 'fifth' | 'approach' | 'chromatic' | 'ghost';
 
 /** One hit in a one-bar (16-step) pattern. */
 export interface Hit {
@@ -92,15 +93,25 @@ export const STYLES: Record<StyleId, StyleDef> = {
         [5, 1, 3, 4],
       ],
     },
+    // 2-step lines: on the 1, answering the kick a sixteenth or two later, bouncing up the octave.
     bass: [
-      [[b(0, 6), b(10, 6)], [b(0, 4), b(7, 3), b(10, 6)]],
+      [
+        [b(0, 6), b(10, 6)],
+        [b(0, 4), b(7, 3), b(10, 6)],
+        [b(0, 3), b(6, 2), b(10, 4)],
+        [b(0, 2), b(7, 3), b(13, 2, 'octave')],
+      ],
       [
         [b(0, 4), b(7, 3), b(10, 4, 'octave'), b(14, 2, 'approach')],
         [b(0, 3), b(3, 3), b(6, 2, 'octave'), b(10, 4), b(14, 2, 'approach')],
+        [b(0, 2), b(3, 2), b(7, 2, 'octave'), b(10, 2), b(13, 2)],
+        [b(0, 3), b(6, 1), b(7, 2, 'octave'), b(10, 3), b(14, 2, 'approach')],
+        [b(0, 2), b(3, 1, 'octave'), b(6, 2), b(10, 2), b(11, 2, 'octave'), b(14, 2)],
       ],
       [
         [b(0, 2), b(3, 1), b(6, 2, 'octave'), b(8, 2), b(11, 1), b(14, 2, 'approach')],
         [b(0, 3), b(3, 2, 'octave'), b(7, 1), b(10, 2), b(12, 1, 'fifth'), b(14, 2, 'approach')],
+        [b(0, 2), b(2, 1, 'octave'), b(3, 2), b(6, 2), b(10, 2, 'octave'), b(11, 1), b(13, 2), b(15, 1, 'approach')],
       ],
     ],
     chords: [
@@ -140,7 +151,11 @@ export const STYLES: Record<StyleId, StyleDef> = {
     },
     bass: [
       [[b(0, 8), b(8, 8)], [b(0, 6), b(6, 2), b(8, 8)]],
-      [[b(2, 2), b(6, 2), b(10, 2), b(14, 2)], [b(0, 3), b(3, 3), b(6, 2, 'octave'), b(8, 3), b(11, 3, 'fifth'), b(14, 2, 'octave')]],
+      [
+        [b(2, 2), b(6, 2), b(10, 2), b(14, 2)],
+        [b(0, 3), b(3, 3), b(6, 2, 'octave'), b(8, 3), b(11, 3, 'fifth'), b(14, 2, 'octave')],
+        [b(2, 2), b(6, 2, 'octave'), b(10, 2), b(13, 1), b(14, 2, 'octave')],
+      ],
       [
         [b(0, 2), b(2, 2, 'octave'), b(4, 2), b(6, 2, 'octave'), b(8, 2), b(10, 2, 'octave'), b(12, 2), b(14, 2, 'octave')],
         [b(2, 2), b(4, 1), b(6, 2, 'octave'), b(10, 2), b(12, 1), b(14, 2, 'approach')],
@@ -184,7 +199,11 @@ export const STYLES: Record<StyleId, StyleDef> = {
     },
     bass: [
       [[b(0, 6), b(8, 4), b(14, 2, 'approach')], [b(0, 8), b(10, 6)]],
-      [[b(0, 4), b(6, 2), b(10, 3, 'fifth'), b(14, 2, 'octave')], [b(0, 2), b(3, 3), b(8, 2), b(11, 3, 'fifth'), b(14, 2, 'octave')]],
+      [
+        [b(0, 4), b(6, 2), b(10, 3, 'fifth'), b(14, 2, 'octave')],
+        [b(0, 2), b(3, 3), b(8, 2), b(11, 3, 'fifth'), b(14, 2, 'octave')],
+        [b(0, 3), b(3, 4), b(10, 2), b(13, 3, 'fifth')],
+      ],
       [
         [b(0, 2), b(3, 2), b(6, 1, 'octave'), b(8, 2), b(11, 2), b(14, 2, 'approach')],
         [b(0, 2), b(2, 1, 'octave'), b(6, 2), b(8, 2), b(10, 1, 'octave'), b(13, 3, 'fifth')],

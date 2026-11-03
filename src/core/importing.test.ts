@@ -73,7 +73,11 @@ describe('readMidi', () => {
     for (const [i, track] of (['melody', 'counter', 'brass', 'chords', 'bass'] as TrackId[]).entries()) {
       const want = comp.notes
         .filter((n) => n.track === track)
-        .map(({ pitch, start, duration, velocity }) => ({ pitch, start, duration, velocity }))
+        // A note's nudge moves it off the grid in the file, both ends alike.
+        .map(({ pitch, start, duration, velocity, nudge = 0 }) => {
+          const on = Math.max(0, start + nudge);
+          return { pitch, start: on, duration: start + duration + nudge - on, velocity };
+        })
         .sort((a, b) => a.start - b.start || a.pitch - b.pitch);
       expect(file.tracks[i].notes).toEqual(want);
     }

@@ -113,7 +113,8 @@ function bassRoot(chord: Chord, near: number): number {
 function pickup(pool: readonly number[], target: number, chord: Chord, flip: boolean): number[] | null {
   const at = nearestIndex(pool, target);
   for (const dir of flip ? [-1, 1] : [1, -1]) {
-    const path = [3, 2, 1].map((k) => fitToChord(pool[clamp(at - dir * k, 0, pool.length - 1)], chord));
+    const range = { low: pool[0], high: pool[pool.length - 1] };
+    const path = [3, 2, 1].map((k) => fitToChord(pool[clamp(at - dir * k, 0, pool.length - 1)], chord, range));
     if (chord.tones.slice(0, 3).includes(pc(path[2])) && path[2] !== target && new Set(path).size === 3) return path;
   }
   return null;

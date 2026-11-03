@@ -1,5 +1,6 @@
 import { BASELINE, valueAt } from './automation';
 import { beatHits, type DrumHit } from './beat';
+import { developMaterial, turnaround } from './develop';
 import { resolveTransition } from './transition';
 import {
   STEPS_PER_BAR,
@@ -15,6 +16,7 @@ import {
   type FilterMove,
   type NoteEvent,
   type SectionKind,
+  type SectionMaterial,
   type SongSection,
   type StyleId,
   type TrackId,
@@ -101,6 +103,48 @@ export const SECTION_KINDS: Record<SectionKind, SectionKindDef> = {
 };
 
 export const SECTION_KIND_IDS = Object.keys(SECTION_KINDS) as SectionKind[];
+
+export interface MaterialDef {
+  label: string;
+  /** For the timeline. */
+  short: string;
+  reason: string;
+}
+
+export const MATERIALS: Record<SectionMaterial, MaterialDef> = {
+  A: { label: 'A · the loop', short: 'A', reason: 'The loop as written.' },
+  A1: { label: 'A′ · new endings', short: 'A′', reason: 'The loop with new phrase endings, and a bass that leans into the chord changes.' },
+  A2: { label: 'A″ · lifted', short: 'A″', reason: 'A busier, brighter return: octave leaps and passing notes, new stabs, a busier bass.' },
+  B: { label: 'B · contrast', short: 'B', reason: 'A contrast made from the same notes: the melody moved or turned over, held chords, roots in the bass.' },
+  reduced: { label: 'Reduced', short: 'R', reason: 'The bare bones: fewer melody notes, held chords and roots in the bass.' },
+};
+export const MATERIAL_IDS = Object.keys(MATERIALS) as SectionMaterial[];
+
+/** Sections the song lands on: the bars before them turn around into them. */
+const LANDINGS: ReadonlySet<SectionKind> = new Set(['drop', 'hook']);
+
+/**
+ * The material a section plays. Auto: intros and outros reduced, verses and builds A′, breakdowns
+ * and bridges B, the first drop or hook the loop itself, and every later one A″.
+ */
+export function resolveMaterial(sections: readonly SongSection[], index: number): SectionMaterial {
+  const section = sections[index];
+  if (section.material && section.material !== 'auto') return section.material;
+  switch (section.kind) {
+    case 'intro':
+    case 'outro':
+      return 'reduced';
+    case 'verse':
+    case 'build':
+      return 'A1';
+    case 'breakdown':
+    case 'bridge':
+      return 'B';
+    case 'drop':
+    case 'hook':
+      return sections.slice(0, index).some((s) => LANDINGS.has(s.kind)) ? 'A2' : 'A';
+  }
+}
 export const DRUM_LEVELS: readonly DrumLevel[] = ['off', 'light', 'full', 'build'];
 export const FILTER_MOVES: readonly FilterMove[] = ['open', 'dark', 'rise'];
 export const SECTION_LENGTHS = [4, 8, 16, 32] as const;
@@ -302,13 +346,30 @@ function passes(span: SongSpan, loopTicks: number): number[] {
   return out;
 }
 
-/** Every note of the song: the active parts' loop notes, pass by pass, cut at each section's end. */
+/**
+ * Every note of the song: each section's version of the loop for its active parts, pass by pass,
+ * cut at the section's end. The last pass before a drop or hook turns around into it.
+ */
 export function songNotes(composition: Composition): NoteEvent[] {
   const loop = totalTicks(composition.settings.bars);
+  const { sections } = composition.arrangement;
+  const versions = new Map<string, NoteEvent[]>();
+  const version = (material: SectionMaterial, turn: boolean): NoteEvent[] => {
+    const key = `${material}${turn ? '/turn' : ''}`;
+    let notes = versions.get(key);
+    if (!notes) {
+      notes = turn ? turnaround(composition, version(material, false)) : developMaterial(composition, material);
+      versions.set(key, notes);
+    }
+    return notes;
+  };
   const out: NoteEvent[] = [];
   for (const span of songSpans(composition.arrangement)) {
-    passes(span, loop).forEach((offset, pass) => {
-      for (const n of composition.notes) {
+    const material = resolveMaterial(sections, span.index);
+    const next = sections[span.index + 1];
+    const all = passes(span, loop);
+    all.forEach((offset, pass) => {
+      for (const n of version(material, !!next && LANDINGS.has(next.kind) && pass === all.length - 1)) {
         if (!span.section.parts[n.track]) continue;
         const start = offset + n.start;
         if (start >= span.end) continue;
@@ -316,7 +377,7 @@ export function songNotes(composition: Composition): NoteEvent[] {
       }
     });
   }
-  return out;
+  return out.sort((a, b) => a.start - b.start);
 }
 
 /** Every drum hit of the song, by each section's drum level. */
@@ -382,7 +443,7 @@ export function songAutomation(composition: Composition): SongLane[] {
 // ---------------------------------------------------------------------------
 // Edits. Each returns a new arrangement, or the same one when nothing changes.
 
-type SectionPatch = Partial<Pick<SongSection, 'kind' | 'bars' | 'drums' | 'filter'>>;
+type SectionPatch = Partial<Pick<SongSection, 'kind' | 'bars' | 'drums' | 'filter' | 'material'>>;
 
 const withSections = (arrangement: Arrangement, sections: SongSection[]): Arrangement => ({ ...arrangement, sections });
 const nextId = (arrangement: Arrangement) => `s${Math.max(0, ...arrangement.sections.map((s) => Number(s.id.slice(1)) || 0)) + 1}`;

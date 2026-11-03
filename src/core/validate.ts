@@ -1,4 +1,4 @@
-import { DRUM_LEVELS, FILTER_MOVES, SECTION_KINDS, fitArrangement, suggestArrangement } from './arrangement';
+import { DRUM_LEVELS, FILTER_MOVES, MATERIALS, SECTION_KINDS, fitArrangement, suggestArrangement } from './arrangement';
 import { AUTOMATION_PARAMS, suggestAutomation } from './automation';
 import { generateBrass } from './brass';
 import { createSettings, generateComposition, withTransition } from './generator';
@@ -16,6 +16,7 @@ import {
   type Composition,
   type CompositionSettings,
   type ImportSource,
+  type Locks,
   type NoteEvent,
   type Phrasing,
   type TrackId,
@@ -32,7 +33,8 @@ function isNote(v: unknown): v is NoteEvent {
     isNum(v.pitch) &&
     isNum(v.start) &&
     isNum(v.duration) &&
-    isNum(v.velocity)
+    isNum(v.velocity) &&
+    (v.nudge === undefined || isNum(v.nudge))
   );
 }
 
@@ -72,9 +74,19 @@ function isArrangement(v: unknown): v is Arrangement {
         isObj(s.parts) &&
         TRACK_IDS.every((t) => t === 'brass' || typeof (s.parts as Record<string, unknown>)[t] === 'boolean') &&
         DRUM_LEVELS.includes(s.drums as never) &&
-        FILTER_MOVES.includes(s.filter as never),
+        FILTER_MOVES.includes(s.filter as never) &&
+        // Sections saved before materials play auto.
+        (s.material === undefined || s.material === 'auto' || (typeof s.material === 'string' && s.material in MATERIALS)),
     )
   );
+}
+
+/** Locks from a save, keeping only the parts and bars that exist. Undefined when nothing is locked. */
+function readLocks(v: unknown, bars: number): Locks | undefined {
+  if (!isObj(v)) return undefined;
+  const tracks = Array.isArray(v.tracks) ? TRACK_IDS.filter((t) => (v.tracks as unknown[]).includes(t)) : [];
+  const locked = Array.isArray(v.bars) ? [...new Set(v.bars.filter((b): b is number => Number.isInteger(b) && b >= 0 && b < bars))].sort((a, b) => a - b) : [];
+  return tracks.length || locked.length ? { tracks, bars: locked } : undefined;
 }
 
 /** Sections saved before the brass part bring it in where their kind does. */
@@ -145,6 +157,7 @@ export function readComposition(value: unknown): Composition | null {
     creativity: isNum(s.creativity) ? Math.min(1, Math.max(0, s.creativity)) : createSettings().creativity,
     automationSeed: isNum(s.automationSeed) ? s.automationSeed : deriveSeed(s.seed as number, 'automation'),
   } as CompositionSettings;
+  if (!isNum(settings.harmonySeed)) delete settings.harmonySeed;
   const progression = value.progression as Chord[];
   const phrasing = isPhrasing(value.phrasing) ? value.phrasing : generateComposition(settings).phrasing;
   let notes = value.notes as NoteEvent[];
@@ -163,5 +176,7 @@ export function readComposition(value: unknown): Composition | null {
       ? fitArrangement(withBrass(value.arrangement), settings.bars)
       : suggestArrangement(settings.style, settings.bars);
   const source = readSource(value.source);
-  return { ...base, phrasing, automation, arrangement, ...(source && { source }) };
+  const locks = readLocks(value.locks, settings.bars);
+  const edited = Array.isArray(value.edited) ? TRACK_IDS.filter((t) => (value.edited as unknown[]).includes(t)) : [];
+  return { ...base, phrasing, automation, arrangement, ...(source && { source }), ...(locks && { locks }), ...(edited.length ? { edited } : {}) };
 }

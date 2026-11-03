@@ -85,8 +85,10 @@ function trackChunk(events: TimedEvent[], endTick: number): number[] {
 function noteEvents(notes: readonly NoteEvent[], channel: number, swing: number | null): TimedEvent[] {
   const events: TimedEvent[] = [];
   for (const n of notes) {
-    const on = Math.round(swing === null ? n.start : swingTick(n.start, swing));
-    const off = Math.max(on + 1, Math.round(swing === null ? n.start + n.duration : swingTick(n.start + n.duration, swing)));
+    // The note's feel moves both ends, so it keeps its length.
+    const nudge = n.nudge ?? 0;
+    const on = Math.max(0, Math.round((swing === null ? n.start : swingTick(n.start, swing)) + nudge));
+    const off = Math.max(on + 1, Math.round((swing === null ? n.start + n.duration : swingTick(n.start + n.duration, swing)) + nudge));
     events.push({ tick: on, order: 2, bytes: [0x90 | channel, n.pitch & 0x7f, Math.max(1, n.velocity) & 0x7f] });
     events.push({ tick: off, order: 1, bytes: [0x80 | channel, n.pitch & 0x7f, 0x40] });
   }

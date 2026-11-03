@@ -1,10 +1,13 @@
 import { fitArrangement, suggestArrangement } from './arrangement';
-import { drumPattern } from './beat';
 import { generateBrass } from './brass';
+import { clearEdited, keepBars } from './edit';
+import { perform } from './expression';
 import { boldProgressions, colourProgression } from './harmony';
 import { suggestAutomation } from './automation';
 import { generateMelody, resolveForm, tradeResponses } from './melody';
+import { BASS_FEEL, CHORD_FEEL, barSteps, bassFit, chordFit, makePlan } from './plan';
 import { createRng, deriveSeed, type Rng } from './random';
+import { pickTake, scoreBass } from './score';
 import { resolveTransition, transitionPart } from './transition';
 import { contour, type ContourKind } from './motif';
 import {
@@ -16,11 +19,9 @@ import {
   hitsAt,
   isTurnaround,
   lerp,
-  lockTo,
   nearestIndex,
   nearestWhere,
   noteId,
-  onsetProfile,
   pc,
   snapToChordTone,
   sortNotes,
@@ -32,6 +33,7 @@ import {
   STEP,
   STEPS_PER_BAR,
   TICKS_PER_BAR,
+  TRACK_IDS,
   totalTicks,
   type Arrangement,
   type AutomationLane,
@@ -97,7 +99,7 @@ const FALLBACK_PROGRESSIONS = {
 };
 
 export function generateProgression(settings: CompositionSettings): Chord[] {
-  const rng = createRng(deriveSeed(settings.seed, 'harmony'));
+  const rng = createRng(deriveSeed(settings.harmonySeed ?? settings.seed, 'harmony'));
   const style = STYLES[settings.style];
   const family = SCALES[settings.scale].family;
   // Diminished and augmented chords rarely suit these genres; skip progressions that land on them in this mode.
@@ -316,7 +318,7 @@ export function generateCounter(
     return tradeResponses(settings, progression, melody, phrasing, rng).map((n, i) => ({
       id: noteId('counter', seed, i),
       track: 'counter',
-      pitch: fitToChord(n.pitch, chordAt(progression, n.start)),
+      pitch: fitToChord(n.pitch, chordAt(progression, n.start), REGISTERS.counter),
       start: n.start,
       duration: n.duration,
       velocity: velocity(n.accent + rng.float(-5, 5)),
@@ -394,7 +396,7 @@ export function generateCounter(
       // Beats land on chord tones; the loop's last note settles on the chord's triad.
       if (lastBar && i === hits.length - 1) index = nearestWhere(pool, index, dir, (p) => chord.tones.slice(0, 3).includes(pc(p)));
       else if (hit.step % 4 === 0) index = snapToChordTone(pool, chord.tones, index, dir);
-      let pitch = fitToChord(pool[index], chord);
+      let pitch = fitToChord(pool[index], chord, REGISTERS.counter);
       const mp = mel.sounding[step];
       if (mp >= 0 && pitch > mp - 2) pitch -= 12;
       if (pitch < low || (mp >= 0 && pitch > mp - 2)) return;
@@ -430,8 +432,9 @@ const VOICINGS: Record<StyleId, [VoicingShape, number][]> = {
 /**
  * Close-position voicing with the smoothest move from the last chord. `lead` (0–1) favours
  * voicings whose top note moves by a step, so the chords carry a little line of their own.
+ * Voicings whose top note rises past `ceiling` (just under the melody) are avoided.
  */
-function voiceChord(chord: Chord, previous: number[] | null, lead = 0): number[] {
+function voiceChord(chord: Chord, previous: number[] | null, lead = 0, ceiling = REGISTERS.chords.high): number[] {
   const { low, high } = REGISTERS.chords;
   // Extended chords drop the root: the bass already has it, and the shell sounds cleaner.
   const tones = chord.tones.length >= 4 ? chord.tones.slice(1) : chord.tones;
@@ -457,7 +460,10 @@ function voiceChord(chord: Chord, previous: number[] | null, lead = 0): number[]
           : 0;
         const topMove = previous ? Math.abs(v[v.length - 1] - previous[previous.length - 1]) : 1;
         const line = lead * (topMove === 0 ? 2 : topMove <= 2 ? 0 : topMove * 0.5);
-        const score = muddy + centre + motion + line;
+        // Notes the two chords share stay where they are, so the change sounds like movement, not a jump.
+        const common = previous ? v.filter((p) => previous.includes(p)).length * 1.2 : 0;
+        const over = Math.max(0, v[v.length - 1] - ceiling) * 4;
+        const score = muddy + centre + motion + line - common + over;
         if (score < bestScore) [best, bestScore] = [v, score];
       }
     }
@@ -478,14 +484,8 @@ function shapeVoicing(voicing: number[], shape: VoicingShape): number[] {
   return top - 12 >= low && !voicing.includes(top - 12) ? [top - 12, ...voicing].sort((a, b) => a - b) : voicing;
 }
 
-/** How strongly a new part is drawn to land with the parts already written. */
-const LOCK = 2.5;
-
-/** The loop's kick, and the notes already written, as one groove for a new part to lock to. */
-function grooveOf(settings: CompositionSettings, around: readonly NoteEvent[]): number[] {
-  const kick = new Set(drumPattern(settings).kick);
-  return onsetProfile(around, settings.bars).map((v, s) => Math.max(v, kick.has(s) ? 0.5 : 0));
-}
+/** How sharply a rhythm that fits the plan is preferred: a tenth outside a window costs a factor of e. */
+const FIT = 10;
 
 /** A one-bar rhythm, and the style pattern it was made from. */
 interface Rhythm<T extends Hit> {
@@ -580,9 +580,9 @@ function rhythms<T extends Hit>(rng: Rng, patterns: readonly T[][], added: (rng:
   return out;
 }
 
-/** One rhythm, favouring those that hit where the groove already does. */
-function pickLocked<T extends Hit>(rng: Rng, choices: readonly Rhythm<T>[], groove: readonly number[]): Rhythm<T> {
-  return rng.weighted(choices, choices.map((r) => Math.exp(LOCK * lockTo(r.hits, groove))));
+/** One rhythm, favouring those that sit best in the plan's groove, so the takes stay varied but idiomatic. */
+function pickFitting<T extends Hit>(rng: Rng, choices: readonly Rhythm<T>[], fit: (hits: readonly T[]) => number): Rhythm<T> {
+  return rng.weighted(choices, choices.map((r) => Math.exp(FIT * fit(r.hits))));
 }
 
 /** A different pattern from the same density band, for a fill. */
@@ -598,7 +598,16 @@ function freeStep(rng: Rng, hits: readonly Hit[], span: number): number | null {
   return free.length ? rng.weighted(free, free.map((s) => (s % 2 === 1 ? 2 : 1))) : null;
 }
 
-export function generateChords(settings: CompositionSettings, progression: readonly Chord[], around: readonly NoteEvent[] = []): NoteEvent[] {
+/**
+ * `around`: the bass, if it's already written, which the stabs partly land with. `under`: the
+ * melody, which the voicings stay below; it changes the notes of the chords but never their rhythm.
+ */
+export function generateChords(
+  settings: CompositionSettings,
+  progression: readonly Chord[],
+  around: readonly NoteEvent[] = [],
+  under: readonly NoteEvent[] = [],
+): NoteEvent[] {
   const seed = settings.trackSeeds.chords;
   const rng = createRng(seed);
   // Creative choices draw from their own stream, so at creativity 0 the part is as it always was.
@@ -607,7 +616,10 @@ export function generateChords(settings: CompositionSettings, progression: reado
   const style = STYLES[settings.style];
   const patterns = style.chords[densityBand(settings.density)];
   const choices = rhythms(createRng(deriveSeed(seed, 'rhythm')), patterns, () => ({}));
-  const { hits: pattern, base } = pickLocked(rng, choices, grooveOf(settings, around));
+  // Stabs between the kicks in UKG and house, on the downbeat in melodic house; with some of the bass if it's already there.
+  const { drums } = makePlan(settings);
+  const bass = barSteps(around.filter((n) => n.track === 'bass').map((n) => n.start), STEP);
+  const { hits: pattern, base } = pickFitting(rng, choices, (hits) => chordFit(hits, drums, CHORD_FEEL[settings.style], bass));
   const shapes = VOICINGS[settings.style];
   const shape = flair.chance(c) ? flair.weighted(shapes.map(([s]) => s), shapes.map(([, w]) => w)) : 'close';
   // Decided once for the whole loop, so every bar is played the same way: the style's other
@@ -620,7 +632,10 @@ export function generateChords(settings: CompositionSettings, progression: reado
   let lastEnd = 0;
 
   progression.forEach((chord, ci) => {
-    const voicing = voiceChord(chord, previous, c);
+    // A little top line at every setting; more of one as creativity rises.
+    const from = chord.start - STEP * 2;
+    const above = under.filter((m) => m.start < chord.start + chord.duration && m.start + m.duration > from).map((m) => m.pitch);
+    const voicing = voiceChord(chord, previous, Math.max(0.4, c), above.length ? Math.min(...above) - 2 : undefined);
     previous = voicing;
     const voiced = shapeVoicing(voicing, shape);
     const span = chord.duration / STEP;
@@ -666,28 +681,125 @@ function mutateBass(rng: Rng, c: number, hits: BassHit[], span: number): BassHit
     const i = rng.int(1, out.length - 1);
     const moved = out[i].step + 1;
     const nextStep = out[i + 1]?.step ?? span;
-    if (moved < nextStep) out[i] = { ...out[i], step: moved, len: Math.max(1, out[i].len - 1) };
+    if (out[i].tone !== 'ghost' && moved < nextStep) out[i] = { ...out[i], step: moved, len: Math.max(1, out[i].len - 1) };
   }
   const tail = out[out.length - 1];
-  if (out.length > 1 && tail.step >= 2 && tail.tone !== 'approach' && rng.chance(c * 0.35)) {
+  if (out.length > 1 && tail.step >= 2 && tail.tone !== 'approach' && tail.tone !== 'ghost' && rng.chance(c * 0.35)) {
     out = [...out.slice(0, -1), { ...tail, tone: rng.chance(0.6) ? 'chromatic' : 'approach' }];
   }
   return fitHits(out, span);
 }
 
+/**
+ * The second bar of a two-bar bass figure: the first bar's front half, answered in the back half
+ * by an octave pop, another take's ending, or a gap. The downbeat and beat three stay, so the
+ * harmony still lands.
+ */
+function answerBar(rng: Rng, pattern: readonly BassHit[], choices: readonly Rhythm<BassHit>[]): BassHit[] {
+  const front = pattern.filter((h) => h.step < 8);
+  const back = pattern.filter((h) => h.step >= 8);
+  const key = (hits: readonly BassHit[]) => JSON.stringify(hits);
+  const options: [() => BassHit[] | null, number][] = [
+    [
+      () => {
+        const i = back.findLastIndex((h) => h.tone === 'root' && h.step > 8);
+        return i < 0 ? null : [...front, ...back.map((h, k): BassHit => (k === i ? { ...h, tone: 'octave' } : h))];
+      },
+      2,
+    ],
+    [
+      () => {
+        const ends = choices
+          .map((c) => c.hits.filter((h) => h.step >= 8))
+          .filter((b) => b.length && b[0].step === back[0]?.step && key(b) !== key(back));
+        return ends.length ? [...front, ...rng.pick(ends)] : null;
+      },
+      2,
+    ],
+    [
+      () => {
+        const spare = back.filter((h) => h.step !== 8);
+        if (!spare.length || pattern.length <= 3) return null;
+        const gone = rng.pick(spare);
+        return pattern.filter((h) => h !== gone);
+      },
+      1,
+    ],
+  ];
+  for (let tries = 0; tries < 4; tries++) {
+    const made = rng.weighted(options, options.map(([, w]) => w))[0]();
+    if (made && key(fitHits(made, STEPS_PER_BAR)) !== key(pattern)) return fitHits(made, STEPS_PER_BAR);
+  }
+  return [...pattern];
+}
+
+/** Each note sounds for `gate` of the gap to the next, so the line bounces; held notes and sixteenths stay as they are. */
+function articulate(hits: readonly BassHit[], gate: number): BassHit[] {
+  if (gate >= 1) return [...hits];
+  return hits.map((h, i) => {
+    const gap = (hits[i + 1]?.step ?? STEPS_PER_BAR) - h.step;
+    return gap < 3 || h.len >= 6 ? h : { ...h, len: Math.max(1, Math.min(h.len, Math.round(gap * gate))) };
+  });
+}
+
+/** A sixteenth just before one of the hits, in a gap and off the backbeat, for a ghost note leading into it. */
+function ghostStep(rng: Rng, hits: readonly BassHit[], clap: readonly number[]): number | null {
+  const covered = (s: number) => hits.some((h) => h.step <= s && s < h.step + h.len);
+  const options = hits.map((h) => h.step - 1).filter((s) => s > 0 && s % 2 === 1 && !covered(s) && !clap.includes(s));
+  return options.length ? rng.pick(options) : null;
+}
+
+const withGhost = (hits: readonly BassHit[], at: number | null): BassHit[] =>
+  at === null || hits.some((h) => h.step <= at && at < h.step + h.len)
+    ? [...hits]
+    : fitHits([...hits, { step: at, len: 1, tone: 'ghost' }], STEPS_PER_BAR);
+
+/** Bass takes written for each loop; the one that sits best in the groove is kept. */
+export const BASS_TAKES = 4;
+
+/** The takes a bassline is chosen from: the seed's own, then ones from seeds derived from it. `around`: the chords it meets. */
+export function bassTakes(settings: CompositionSettings, progression: readonly Chord[], around: readonly NoteEvent[] = []): { notes: NoteEvent[]; score: number }[] {
+  const chords = around.filter((n) => n.track === 'chords');
+  return Array.from({ length: BASS_TAKES }, (_, i) => {
+    const bass = i ? deriveSeed(settings.trackSeeds.bass, `take${i}`) : settings.trackSeeds.bass;
+    const notes = writeBass({ ...settings, trackSeeds: { ...settings.trackSeeds, bass } }, progression, around);
+    return { notes, score: scoreBass(notes, settings, chords) };
+  });
+}
+
+/** The bassline for a loop: the best of its takes. Same seed, harmony and chords, same bass. */
 export function generateBass(settings: CompositionSettings, progression: readonly Chord[], around: readonly NoteEvent[] = []): NoteEvent[] {
+  return pickTake(bassTakes(settings, progression, around)).notes;
+}
+
+/** One take of the bass, from the bass seed alone. */
+function writeBass(settings: CompositionSettings, progression: readonly Chord[], around: readonly NoteEvent[] = []): NoteEvent[] {
   const seed = settings.trackSeeds.bass;
   const rng = createRng(seed);
   const flair = createRng(deriveSeed(seed, 'flair'));
+  // The figure, its touch and the ghost note have their own stream, so they hold when the rest changes.
+  const figure = createRng(deriveSeed(seed, 'figure'));
   const c = settings.creativity;
   const style = STYLES[settings.style];
+  const feel = BASS_FEEL[settings.style];
+  const { drums } = makePlan(settings);
+  const kicks = new Set(drums.kick);
   const { low, high } = REGISTERS.bass;
   const patterns = style.bass[densityBand(settings.density)];
   // Added hits are mostly roots, sometimes an octave pop. 808 lines run on rather than clip short.
   const added = (r: Rng): Omit<BassHit, keyof Hit> => ({ tone: r.chance(0.3) ? 'octave' : 'root' });
   const moves = settings.style === 'rap' ? { ...MOVES, clip: 0, hold: 2 } : MOVES;
   const choices = rhythms(createRng(deriveSeed(seed, 'rhythm')), patterns, added, moves);
-  const { hits: pattern, base } = pickLocked(rng, choices, grooveOf(settings, around));
+  // The take that sits best against the kick: on some kicks, answering others, off the backbeat.
+  const stabs = barSteps(around.filter((n) => n.track === 'chords').map((n) => n.start), STEP);
+  const { hits: chosen, base } = pickFitting(rng, choices, (hits) => bassFit(hits, drums, feel, stabs));
+  // A two-bar figure: the second bar answers the first, most of the time.
+  const answered = figure.chance(feel.answerBar) ? answerBar(figure, chosen, choices) : chosen;
+  const gate = figure.float(feel.gate[0], feel.gate[1]);
+  const ghostChance = feel.ghost * (settings.density < 0.2 ? 0.5 : 1);
+  const ghost = figure.chance(ghostChance) ? ghostStep(figure, articulate(chosen, gate), drums.clap) : null;
+  const pattern = withGhost(articulate(chosen, gate), ghost);
+  const second = withGhost(articulate(answered, gate), ghost);
   // Decided once for the whole loop: a fill pattern for the end of each phrase, and whether the 808 slides.
   const fill = flair.chance(c * 0.6) ? otherPattern(flair, patterns, base) : null;
   const slide = settings.style === 'rap' && flair.chance(c * 0.5);
@@ -702,7 +814,7 @@ export function generateBass(settings: CompositionSettings, progression: readonl
       pitch: clamp(pitch, low, high),
       start,
       duration,
-      velocity: velocity(accent + rng.float(-5, 5)),
+      velocity: velocity(accent + rng.float(-4, 4)),
     });
 
   const rootNear = (rootPc: number, near: number | null) => {
@@ -718,14 +830,16 @@ export function generateBass(settings: CompositionSettings, progression: readonl
     const nextRoot = roots[(ci + 1) % roots.length];
     const span = chord.duration / STEP;
     const offset = (chord.start % TICKS_PER_BAR) / STEP;
-    const bar = fill && isTurnaround(Math.floor(chord.start / TICKS_PER_BAR), settings.bars) ? fill : pattern;
+    const barIndex = Math.floor(chord.start / TICKS_PER_BAR);
+    const own = barIndex % 2 === 1 ? second : pattern;
+    const bar = fill && isTurnaround(barIndex, settings.bars) ? fill : own;
     let hits: BassHit[] = hitsAt(bar, offset, span);
     if (!hits.length) hits = [{ step: 0, len: span, tone: 'root' }];
     // A chord that starts mid-bar still opens on its root.
-    if (hits[0].tone === 'fifth' || hits[0].tone === 'approach') hits = [{ ...hits[0], tone: 'root' }, ...hits.slice(1)];
-    const filled = bar !== pattern;
+    if (hits[0].tone !== 'root' && hits[0].tone !== 'octave') hits = [{ ...hits[0], tone: 'root' }, ...hits.slice(1)];
+    const filled = bar === fill;
     if (c > 0 && !filled) {
-      const key = `${offset}:${span}`;
+      const key = `${offset}:${span}:${own === second ? 'b' : 'a'}`;
       if (!mutated.has(key)) mutated.set(key, mutateBass(flair, c, hits, span));
       hits = mutated.get(key)!;
     }
@@ -735,9 +849,9 @@ export function generateBass(settings: CompositionSettings, progression: readonl
     const walk = last && span >= 8 && hits[0].step < span - 4 && flair.chance(c * 0.35);
     if (last && !walk && rng.chance(settings.variation * 0.6)) {
       const tail = hits[hits.length - 1];
-      if (tail.step > 0 && tail.len >= 2) {
+      if (tail.step > 0 && tail.len >= 2 && tail.tone !== 'ghost') {
         hits = [...hits.slice(0, -1), { ...tail, len: 1, tone: 'octave' }, { step: tail.step + 1, len: tail.len - 1, tone: 'approach' }];
-      } else if (tail.step > 0) {
+      } else if (tail.step > 0 && tail.tone !== 'ghost') {
         hits = [...hits.slice(0, -1), { ...tail, tone: 'approach' }];
       }
     }
@@ -763,7 +877,10 @@ export function generateBass(settings: CompositionSettings, progression: readonl
       }
       // A semitone into the next chord's root, from below unless that would leave the register.
       if (tone === 'chromatic') pitch = nextRoot - 1 >= low ? nextRoot - 1 : nextRoot + 1;
-      const accent = hit.step % 4 === 0 ? 104 : hit.step % 2 === 0 ? 98 : 88;
+      // Accents follow the kick: hardest where the bass lands with it, a little less where it answers.
+      const s = offset + hit.step;
+      const answer = [1, 2, 3].some((d) => kicks.has(s - d));
+      const accent = tone === 'ghost' ? 63 : kicks.has(s) ? 106 : answer ? 98 : tone === 'approach' || tone === 'chromatic' ? 90 : 92;
       push(pitch, chord.start + hit.step * STEP, hit.len * STEP, accent);
     });
 
@@ -777,6 +894,39 @@ export function generateBass(settings: CompositionSettings, progression: readonl
     }
   });
   return notes;
+}
+
+/**
+ * Keeps the chords under the melody: a chord note that would sound with a melody note at or just
+ * below it moves down an octave, or drops out if the chord can spare it. The chord's other notes,
+ * and its rhythm, are left alone.
+ */
+export function clearMelody(chords: readonly NoteEvent[], melody: readonly NoteEvent[]): NoteEvent[] {
+  const { low } = REGISTERS.chords;
+  const groups = new Map<number, NoteEvent[]>();
+  for (const n of chords) groups.set(n.start, [...(groups.get(n.start) ?? []), { ...n }]);
+  const out: NoteEvent[] = [];
+  for (const group of groups.values()) {
+    const { start, duration } = group[0];
+    const above = melody.filter((m) => m.start < start + duration && m.start + m.duration > start).map((m) => m.pitch);
+    if (!above.length) {
+      out.push(...group);
+      continue;
+    }
+    const ceiling = Math.min(...above) - 2;
+    const kept: NoteEvent[] = [];
+    const sorted = [...group].sort((a, b) => b.pitch - a.pitch);
+    sorted.forEach((n, i) => {
+      const taken = (p: number) => sorted.some((o) => o !== n && o.pitch === p) || kept.some((o) => o.pitch === p);
+      // Notes still to come are lower, so they stay: a chord keeps at least two.
+      const left = sorted.length - i - 1;
+      if (n.pitch <= ceiling) kept.push(n);
+      else if (n.pitch - 12 >= low && !taken(n.pitch - 12)) kept.push({ ...n, pitch: n.pitch - 12 });
+      else if (kept.length + left < 2) kept.push(n);
+    });
+    out.push(...kept);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -793,22 +943,24 @@ export function generateComposition(
   previousArrangement?: Arrangement,
 ): Composition {
   const progression = generateProgression(settings);
-  // Each part is written around the ones before it: the bass locks to the chords, the melody
-  // leans on their rhythm, the counter-melody fills the melody's gaps, and the brass finds room
-  // around all of them.
+  // Each part is written around the ones before it and the shared plan: the bass answers the kick
+  // and meets some of the chord stabs, the counter-melody fills the melody's gaps, and the brass
+  // finds room around all of them. The melody follows only the plan and the harmony.
   const chords = generateChords(settings, progression);
   const bass = generateBass(settings, progression, chords);
-  const { notes: melody, phrasing } = generateMelody(settings, progression, [...chords, ...bass]);
+  const { notes: melody, phrasing } = generateMelody(settings, progression);
   const counter = generateCounter(settings, progression, melody, phrasing);
   const brass = generateBrass(settings, progression, melody, counter, [...chords, ...bass]);
-  const ending = (track: TrackId, part: NoteEvent[]) => withTransition(settings, progression, phrasing, track, part, melody);
-  const notes = sortNotes([
-    ...ending('melody', melody),
-    ...ending('counter', counter),
-    ...ending('brass', brass),
-    ...ending('chords', chords),
-    ...ending('bass', bass),
-  ]);
+  // The melody with its own share of the transition: what the other parts' endings stay under.
+  const top = withTransition(settings, progression, phrasing, 'melody', melody);
+  const ending = (track: TrackId, part: NoteEvent[]) => withTransition(settings, progression, phrasing, track, part, top);
+  // The same chord rhythm, voiced again now the melody is there to stay under.
+  const voiced = clearMelody(generateChords(settings, progression, [], top), top);
+  const notes = perform(
+    settings,
+    sortNotes([...top, ...ending('counter', counter), ...ending('brass', brass), ...ending('chords', voiced), ...ending('bass', bass)]),
+    new Set(TRACK_IDS),
+  );
   const automation = suggestAutomation({ settings, progression, phrasing, notes }, previous);
   const arrangement =
     previousArrangement?.style === settings.style
@@ -843,13 +995,17 @@ export function refreshAutomation(composition: Composition): Composition {
 }
 
 /**
- * Replaces one part using a new seed. Other parts, including edits, are kept,
- * except that a traded counter-melody and the brass follow a new melody (they
- * answer it, double it or leave it room). Uploaded parts are never replaced.
+ * Replaces one part using a new seed. Other parts, including edits, are kept, except that a
+ * traded counter-melody and the brass follow a new melody (they answer it, double it or leave
+ * it room) unless they are locked, edited or uploaded. Uploaded and locked parts are never
+ * replaced, and locked bars keep their notes.
  */
 export function regenerateTrack(composition: Composition, track: TrackId, seed: number): Composition {
-  const held = new Set(composition.source?.parts.map((p) => p.track));
-  if (held.has(track)) return composition;
+  const locks = composition.locks ?? { tracks: [], bars: [] };
+  const uploaded = new Set(composition.source?.parts.map((p) => p.track));
+  if (uploaded.has(track) || locks.tracks.includes(track)) return composition;
+  // Parts that don't follow a new melody.
+  const held = new Set<TrackId>([...uploaded, ...locks.tracks, ...(composition.edited ?? [])]);
   const settings = { ...composition.settings, trackSeeds: { ...composition.settings.trackSeeds, [track]: seed } };
   const { progression } = composition;
   let { phrasing } = composition;
@@ -859,11 +1015,14 @@ export function regenerateTrack(composition: Composition, track: TrackId, seed: 
 
   const part = (t: TrackId) => composition.notes.filter((n) => n.track === t);
 
-  const ending = (t: TrackId, notes: NoteEvent[]) => withTransition(settings, progression, phrasing, t, notes, melody);
+  // The melody as it plays, transition included: what the other parts' endings stay under.
+  let top = melody;
+  const ending = (t: TrackId, notes: NoteEvent[]) => withTransition(settings, progression, phrasing, t, notes, top);
   if (track === 'melody') {
     const wasTrade = phrasing.form === 'trade';
-    ({ notes: melody, phrasing } = generateMelody(melodySettings(settings, held), progression, [...part('chords'), ...part('bass')]));
-    fresh.push(...ending('melody', melody));
+    ({ notes: melody, phrasing } = generateMelody(melodySettings(settings, held), progression));
+    top = withTransition(settings, progression, phrasing, 'melody', melody);
+    fresh.push(...top);
     if ((wasTrade || phrasing.form === 'trade') && !held.has('counter')) replaced.add('counter');
     if (!held.has('brass')) replaced.add('brass');
   }
@@ -873,11 +1032,12 @@ export function regenerateTrack(composition: Composition, track: TrackId, seed: 
     fresh.push(...ending('counter', counter));
   }
   if (replaced.has('brass')) fresh.push(...ending('brass', generateBrass(settings, progression, melody, counter, [...part('chords'), ...part('bass')])));
-  if (track === 'chords') fresh.push(...ending('chords', generateChords(settings, progression, part('bass'))));
+  if (track === 'chords') fresh.push(...ending('chords', clearMelody(generateChords(settings, progression, part('bass'), top), top)));
   if (track === 'bass') fresh.push(...ending('bass', generateBass(settings, progression, part('chords'))));
 
   const kept = composition.notes.filter((n) => !replaced.has(n.track));
-  return refreshAutomation({ ...composition, settings, phrasing, notes: sortNotes([...kept, ...fresh]) });
+  const notes = keepBars(sortNotes([...kept, ...perform(settings, fresh, replaced)]), composition.notes, locks.bars);
+  return refreshAutomation(clearEdited({ ...composition, settings, phrasing, notes }, replaced));
 }
 
 /** New automation ideas for the same music. */

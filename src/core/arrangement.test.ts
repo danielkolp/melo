@@ -8,6 +8,7 @@ import {
   fitArrangement,
   insertSection,
   loopTickAt,
+  resolveMaterial,
   moveSection,
   removeSection,
   sectionAt,
@@ -25,7 +26,7 @@ import { BASELINE } from './automation';
 import { createSettings, generateComposition } from './generator';
 import { songToMidi } from './midi';
 import { STYLE_IDS } from './styles';
-import { TICKS_PER_BAR, TRACK_IDS, totalTicks, type Composition } from './types';
+import { TICKS_PER_BAR, TRACK_IDS, totalTicks, type Composition, type ImportSource, type NoteEvent, type SectionMaterial, type TrackId } from './types';
 import { readComposition } from './validate';
 
 const compose = (overrides: Parameters<typeof createSettings>[0] = {}): Composition => generateComposition(createSettings({ seed: 7, ...overrides }));
@@ -77,15 +78,20 @@ describe('song timeline', () => {
   });
 
   it('writes only the parts each section has, pass by pass', () => {
-    const comp = compose({ style: 'house', bars: 4 });
+    const base = compose({ style: 'house', bars: 4 });
+    // Every section on the loop as written; only the turnaround into a drop changes it.
+    const comp = { ...base, arrangement: { ...base.arrangement, sections: base.arrangement.sections.map((s) => ({ ...s, material: 'A' as const })) } };
     const notes = songNotes(comp);
     const spans = songSpans(comp.arrangement);
     for (const span of spans) {
       const inside = notes.filter((n) => n.start >= span.start && n.start < span.end);
+      const turns = ['drop', 'hook'].includes(spans[span.index + 1]?.section.kind ?? '');
       for (const t of TRACK_IDS) {
         const count = inside.filter((n) => n.track === t).length;
         const perLoop = comp.notes.filter((n) => n.track === t).length;
-        expect(count).toBe(span.section.parts[t] ? perLoop * (span.section.bars / 4) : 0);
+        if (!span.section.parts[t]) expect(count).toBe(0);
+        else if (!turns) expect(count).toBe(perLoop * (span.section.bars / 4));
+        else expect(count).toBeGreaterThan(0);
       }
       for (const n of inside) expect(n.start + n.duration).toBeLessThanOrEqual(span.end);
     }
@@ -161,6 +167,110 @@ describe('song edits', () => {
     const read = readComposition(JSON.parse(JSON.stringify(old)))!;
     expect(read.arrangement.style).toBe('ukg');
     expect(read.arrangement.sections.length).toBeGreaterThan(3);
+  });
+});
+
+describe('song materials', () => {
+  const SEEDS = Array.from({ length: 10 }, (_, i) => 5 + i * 6151);
+  const loopOf = (notes: NoteEvent[], span: { start: number }, loop: number, track: TrackId) =>
+    notes.filter((n) => n.track === track && n.start >= span.start && n.start < span.start + loop).map((n) => ({ ...n, start: n.start - span.start }));
+  const shape = (notes: readonly NoteEvent[]) => notes.map((n) => `${n.start}:${n.pitch}`).join();
+  /** A song with one section of each material, every part in, and nothing landing after it. */
+  const withMaterials = (comp: Composition, materials: SectionMaterial[]): Composition => ({
+    ...comp,
+    arrangement: {
+      ...comp.arrangement,
+      sections: materials.map((material, i) => ({
+        id: `m${i}`,
+        kind: 'verse' as const,
+        bars: comp.settings.bars,
+        parts: { melody: true, counter: true, brass: true, chords: true, bass: true },
+        drums: 'full' as const,
+        filter: 'open' as const,
+        material,
+      })),
+    },
+  });
+
+  it('chooses each section’s material from its kind and place in the song', () => {
+    const { sections } = suggestArrangement('ukg', 4, 0);
+    expect(sections.map((_, i) => resolveMaterial(sections, i))).toEqual(['reduced', 'A1', 'A', 'A1', 'A2', 'B', 'A2', 'reduced']);
+    const chosen = sections.map((s, i) => (i === 2 ? { ...s, material: 'B' as const } : s));
+    expect(resolveMaterial(chosen, 2)).toBe('B');
+    expect(resolveMaterial(chosen, 4)).toBe('A2');
+  });
+
+  it('plays the loop as written in an A section', () => {
+    for (const seed of SEEDS) {
+      const comp = withMaterials(compose({ style: 'ukg', seed, bars: 4 }), ['A']);
+      const notes = songNotes(comp);
+      for (const t of TRACK_IDS) expect(shape(loopOf(notes, { start: 0 }, totalTicks(4), t))).toBe(shape(comp.notes.filter((n) => n.track === t)));
+    }
+  });
+
+  it('moves the parts on in A′, A″ and B, keeping where they start from', () => {
+    for (const style of STYLE_IDS) {
+      const changed: Record<string, number> = { A1: 0, A2: 0, B: 0 };
+      for (const seed of SEEDS) {
+        const comp = withMaterials(compose({ style, seed, bars: 4 }), ['A1', 'A2', 'B']);
+        const notes = songNotes(comp);
+        const loop = totalTicks(4);
+        (['A1', 'A2', 'B'] as const).forEach((material, i) => {
+          const differs = TRACK_IDS.some((t) => shape(loopOf(notes, { start: i * loop }, loop, t)) !== shape(comp.notes.filter((n) => n.track === t)));
+          if (differs) changed[material]++;
+        });
+        // A′ only changes the endings: every part's first bar is the loop's.
+        const firstBar = (ns: NoteEvent[]) => shape(ns.filter((n) => n.start < TICKS_PER_BAR && n.track !== 'bass'));
+        expect(firstBar(loopOf(notes, { start: 0 }, loop, 'melody'))).toBe(firstBar(comp.notes.filter((n) => n.track === 'melody')));
+      }
+      for (const material of ['A1', 'A2', 'B']) expect(changed[material], `${style} ${material}`).toBeGreaterThanOrEqual(SEEDS.length - 1);
+    }
+  });
+
+  it('thins the parts out in a reduced section', () => {
+    for (const style of STYLE_IDS) {
+      let reduced = 0;
+      let full = 0;
+      for (const seed of SEEDS) {
+        const comp = withMaterials(compose({ style, seed, bars: 4 }), ['A', 'reduced']);
+        const notes = songNotes(comp);
+        full += notes.filter((n) => n.start < totalTicks(4)).length;
+        reduced += notes.filter((n) => n.start >= totalTicks(4)).length;
+      }
+      expect(reduced, style).toBeLessThan(full * 0.85);
+    }
+  });
+
+  it('rests the top lines and walks the bass up in the pass before a drop', () => {
+    for (const seed of SEEDS) {
+      const base = withMaterials(compose({ style: 'house', seed, bars: 4 }), ['A', 'A']);
+      const comp = { ...base, arrangement: { ...base.arrangement, sections: [{ ...base.arrangement.sections[0], bars: 8 }, { ...base.arrangement.sections[1], kind: 'drop' as const }] } };
+      const notes = songNotes(comp);
+      const loop = totalTicks(4);
+      const tail = (from: number) => notes.filter((n) => n.start >= from - TICKS_PER_BAR / 2 && n.start < from);
+      // The first pass is the loop; the second, the last before the drop, leaves the last two beats to the bass.
+      expect(tail(2 * loop).filter((n) => ['melody', 'counter', 'brass'].includes(n.track))).toHaveLength(0);
+      expect(shape(loopOf(notes, { start: 0 }, loop, 'bass'))).toBe(shape(comp.notes.filter((n) => n.track === 'bass')));
+    }
+  });
+
+  it('plays uploaded parts as uploaded in every section', () => {
+    const comp = compose({ style: 'ukg', bars: 4 });
+    const held = withMaterials({ ...comp, source: { parts: [{ track: 'melody', name: 'Lead', notes: [] }] } as unknown as ImportSource }, ['B', 'reduced']);
+    const notes = songNotes(held);
+    const melody = comp.notes.filter((n) => n.track === 'melody');
+    expect(shape(loopOf(notes, { start: 0 }, totalTicks(4), 'melody'))).toBe(shape(melody));
+    expect(shape(loopOf(notes, { start: totalTicks(4) }, totalTicks(4), 'melody'))).toBe(shape(melody));
+  });
+
+  it('is the same every time, and loads saves with or without materials', () => {
+    const comp = compose({ style: 'deepHouse', bars: 8 });
+    expect(songNotes(comp)).toEqual(songNotes(comp));
+    const marked = { ...comp, arrangement: updateSection(comp.arrangement, comp.arrangement.sections[1].id, { material: 'B' }) };
+    expect(readComposition(JSON.parse(JSON.stringify(marked)))!.arrangement.sections[1].material).toBe('B');
+    const broken = JSON.parse(JSON.stringify(marked));
+    broken.arrangement.sections[1].material = 'Z';
+    expect(readComposition(broken)!.arrangement.sections[1].material).toBeUndefined();
   });
 });
 

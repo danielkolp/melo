@@ -4,18 +4,21 @@ import { seek } from '../audio/playback';
 import {
   DRUM_LEVELS,
   FILTER_MOVES,
+  MATERIALS,
+  MATERIAL_IDS,
   SECTION_KINDS,
   SECTION_KIND_IDS,
   SECTION_LENGTHS,
   sectionAt,
   sectionEnergy,
   songLength,
+  resolveMaterial,
   songSpans,
   templateName,
   type SongSpan,
 } from '../core/arrangement';
 import { formatClock, ticksToSeconds } from '../core/format';
-import { TICKS_PER_BAR, TRACK_IDS, type DrumLevel, type FilterMove, type SectionKind } from '../core/types';
+import { TICKS_PER_BAR, TRACK_IDS, type DrumLevel, type FilterMove, type SectionKind, type SectionMaterial, type SongSection } from '../core/types';
 import { canDragOut, dragOut } from '../lib/dragMidi';
 import { exportSong, songFile } from '../lib/exportMidi';
 import { studio, useComposition, useStudio } from '../state/useStudio';
@@ -58,9 +61,10 @@ function DrumMeter({ level }: { level: DrumLevel }) {
   );
 }
 
-function Column({ span, total, selected, current }: { span: SongSpan; total: number; selected: boolean; current: boolean }) {
+function Column({ span, material, total, selected, current }: { span: SongSpan; material: SectionMaterial; total: number; selected: boolean; current: boolean }) {
   const { section } = span;
   const kind = SECTION_KINDS[section.kind];
+  const plays = MATERIALS[material];
   const energy = sectionEnergy(section);
   const playing = useStudio((s) => s.isPlaying);
   const shade =
@@ -76,8 +80,8 @@ function Column({ span, total, selected, current }: { span: SongSpan; total: num
       <button
         type="button"
         aria-pressed={selected}
-        aria-label={`${name(span)}, ${section.bars} bars`}
-        title={`${kind.label} · ${section.bars} bars — ${kind.reason}`}
+        aria-label={`${name(span)}, ${section.bars} bars, plays ${plays.label}`}
+        title={`${kind.label} · ${section.bars} bars · ${plays.label} — ${kind.reason}`}
         onClick={() => {
           studio.getState().selectSection(selected ? null : section.id);
           if (!playing) seek(span.start);
@@ -90,7 +94,9 @@ function Column({ span, total, selected, current }: { span: SongSpan; total: num
       >
         {shade && <span aria-hidden className="pointer-events-none absolute inset-0" style={{ background: shade }} />}
         <span className="relative w-full truncate text-[12px] leading-tight font-medium text-fg">{kind.label}</span>
-        <span className="readout relative w-full truncate text-[10px] text-fg-faint">{section.bars}</span>
+        <span className="readout relative w-full truncate text-[10px] text-fg-faint">
+          {section.bars} · {plays.short}
+        </span>
       </button>
       {TRACK_IDS.map((track) => {
         const on = section.parts[track];
@@ -151,13 +157,21 @@ function Timeline({ spans, total, selected }: { spans: SongSpan[]; total: number
   const ticks = useSongTicks();
   const playing = useStudio((s) => s.isPlaying);
   const current = playing ? sectionAt(spans, ticks) : undefined;
+  const sections = spans.map((s) => s.section);
   return (
     <div className="quiet-scroll min-w-0 flex-1 overflow-x-auto pb-2">
       <div className="relative" style={{ minWidth: (total / TICKS_PER_BAR) * PX_PER_BAR }}>
         <Ruler total={total} />
         <div className="flex">
           {spans.map((span) => (
-            <Column key={span.section.id} span={span} total={total} selected={span.section.id === selected} current={span === current} />
+            <Column
+              key={span.section.id}
+              span={span}
+              material={resolveMaterial(sections, span.index)}
+              total={total}
+              selected={span.section.id === selected}
+              current={span === current}
+            />
           ))}
         </div>
         <span
@@ -171,7 +185,8 @@ function Timeline({ spans, total, selected }: { spans: SongSpan[]; total: number
 }
 
 function Inspector({ span, count }: { span: SongSpan | undefined; count: number }) {
-  const loopBars = useComposition().settings.bars;
+  const { settings, arrangement } = useComposition();
+  const loopBars = settings.bars;
   if (!span) {
     return (
       <p className="border-t border-line px-4 py-3 text-[12px] text-fg-faint md:px-5">
@@ -183,6 +198,11 @@ function Inspector({ span, count }: { span: SongSpan | undefined; count: number 
   const id = section.id;
   const s = studio.getState();
   const lengths = SECTION_LENGTHS.filter((b) => b % loopBars === 0);
+  const auto = resolveMaterial(
+    arrangement.sections.map((x) => (x.id === id ? { ...x, material: 'auto' as const } : x)),
+    span.index,
+  );
+  const material = resolveMaterial(arrangement.sections, span.index);
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-line px-4 py-2.5 md:px-5">
       <div className="w-[124px]">
@@ -191,6 +211,17 @@ function Inspector({ span, count }: { span: SongSpan | undefined; count: number 
           value={section.kind}
           options={SECTION_KIND_IDS.map((k) => ({ value: k, label: SECTION_KINDS[k].label }))}
           onChange={(kind) => s.updateSection(id, { kind })}
+        />
+      </div>
+      <div className="w-[150px]">
+        <Select<NonNullable<SongSection['material']>>
+          label="Material"
+          value={section.material ?? 'auto'}
+          options={[
+            { value: 'auto', label: `Auto (${MATERIALS[auto].short})` },
+            ...MATERIAL_IDS.map((m) => ({ value: m, label: MATERIALS[m].label })),
+          ]}
+          onChange={(m) => s.updateSection(id, { material: m })}
         />
       </div>
       <Segmented
@@ -225,7 +256,9 @@ function Inspector({ span, count }: { span: SongSpan | undefined; count: number 
           <Trash2 size={14} strokeWidth={1.7} />
         </IconButton>
       </div>
-      <p className="min-w-[220px] flex-1 text-[12px] leading-snug text-fg-faint">{SECTION_KINDS[section.kind].reason}</p>
+      <p className="min-w-[220px] flex-1 text-[12px] leading-snug text-fg-faint">
+        {SECTION_KINDS[section.kind].reason} {MATERIALS[material].reason}
+      </p>
     </div>
   );
 }

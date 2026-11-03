@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { createSettings, generateComposition, generateProgression, regenerateTrack } from './generator';
 import { PHRASE_FORM_IDS, melodyPool, realise, resolveForm } from './melody';
+import { makePlan } from './plan';
+import { melodyMetrics } from './score';
 import { makeMotif, vary } from './motif';
 import { createRng } from './random';
 import { STYLES, STYLE_IDS } from './styles';
@@ -107,6 +109,86 @@ describe('riffs', () => {
         expect(new Set(notes.slice(3).map((n) => n.pitch)).size).toBe(1);
       }
     }
+  });
+});
+
+describe('motifs', () => {
+  const melodyOf = (settings: ReturnType<typeof createSettings>) => generateComposition(settings).notes.filter((n) => n.track === 'melody');
+  const headOf = (notes: NoteEvent[], bar: number) =>
+    inBar(notes, bar)
+      .filter((n) => n.start - bar * TICKS_PER_BAR < TICKS_PER_BAR / 2)
+      .map((n) => n.start - bar * TICKS_PER_BAR)
+      .join();
+
+  it('keeps coming back to its idea: most bars share their rhythm with another bar', () => {
+    for (const style of STYLE_IDS) {
+      const recurrence = SEEDS.map((seed) => {
+        const settings = createSettings({ style, seed, bars: 8 });
+        return melodyMetrics(melodyOf(settings), generateComposition(settings).progression, 8).rhythmRecurrence;
+      });
+      expect(recurrence.reduce((a, x) => a + x, 0) / recurrence.length, style).toBeGreaterThan(0.5);
+    }
+  });
+
+  it('builds the second and third bars from the first rather than starting over', () => {
+    let related = 0;
+    let total = 0;
+    for (const style of STYLE_IDS) {
+      for (const phrase of ['callResponse', 'hook', 'questionAnswer'] as const) {
+        for (const seed of SEEDS) {
+          const melody = melodyOf(createSettings({ style, seed, phrase, bars: 4 }));
+          const first = headOf(melody, 0);
+          total++;
+          if ([1, 2].some((bar) => headOf(melody, bar) === first)) related++;
+        }
+      }
+    }
+    expect(related / total).toBeGreaterThan(0.7);
+  });
+
+  it('leaves the back half of a sparse bar to the counter-melody', () => {
+    let sparseBusy = 0;
+    let sparseBars = 0;
+    let fullBusy = 0;
+    let fullBars = 0;
+    for (const seed of SEEDS) {
+      for (const phrase of ['callResponse', 'questionAnswer'] as const) {
+        const settings = createSettings({ style: 'ukg', seed, phrase, bars: 8 });
+        const melody = melodyOf(settings);
+        makePlan(settings).bars.forEach((bar, i) => {
+          // Steps 8–13: the back half, before any push into the next bar.
+          const back = inBar(melody, i).filter((n) => n.start % TICKS_PER_BAR >= STEP * 8 && n.start % TICKS_PER_BAR < STEP * 14).length;
+          if (bar.melody === 'sparse') [sparseBusy, sparseBars] = [sparseBusy + back, sparseBars + 1];
+          else [fullBusy, fullBars] = [fullBusy + back, fullBars + 1];
+        });
+      }
+    }
+    expect(sparseBusy / sparseBars).toBeLessThan(0.35);
+    expect(fullBusy / fullBars).toBeGreaterThan(1);
+  });
+
+  it('keeps the melody when only the chords or the bass are rewritten', () => {
+    for (const seed of SEEDS) {
+      const settings = createSettings({ seed, bars: 4 });
+      const melody = melodyOf(settings);
+      const reseeded = { ...settings, trackSeeds: { ...settings.trackSeeds, chords: seed + 1, bass: seed + 2 } };
+      expect(melodyOf(reseeded)).toEqual(melody);
+    }
+  });
+
+  it('keeps a motif’s intervals when it moves to fit a new chord', () => {
+    const settings = createSettings({ style: 'ukg' });
+    const progression = generateProgression(settings);
+    const pool = melodyPool(settings);
+    const motif = [0, 3, 6, 10].map((step, i) => ({ step, len: 2, deg: [0, 2, 1, 0][i] }));
+    const steps = (bar: number) => {
+      const { notes } = realise({ pool, octave: 7, progression, settings }, motif, bar * TICKS_PER_BAR, 8, null);
+      return notes.map((n) => pool.indexOf(n.pitch)).map((p, _, all) => p - all[0]);
+    };
+    // Over each chord the figure keeps its shape in scale steps, unless a strong note had to move.
+    let kept = 0;
+    for (let bar = 0; bar < settings.bars; bar++) if (JSON.stringify(steps(bar)) === JSON.stringify([0, 2, 1, 0])) kept++;
+    expect(kept).toBeGreaterThanOrEqual(settings.bars - 1);
   });
 });
 

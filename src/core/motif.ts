@@ -18,8 +18,24 @@ export interface MotifNote {
 
 export type Motif = MotifNote[];
 
-/** `riff`: repeated notes in two groups, the pitch changing once (see `riffShape`). */
-export type ContourKind = 'repeat' | 'pedal' | 'turn' | 'leapBack' | 'zigzag' | 'arpUp' | 'stepDown' | 'octave' | 'arch' | 'call' | 'thirds' | 'riff';
+/**
+ * `riff`: repeated notes in two groups, the pitch changing once (see `riffShape`). `anchor`: one
+ * home note repeated, with a single signature move away and back, the way a vocal chop works.
+ */
+export type ContourKind =
+  | 'repeat'
+  | 'pedal'
+  | 'turn'
+  | 'leapBack'
+  | 'zigzag'
+  | 'arpUp'
+  | 'stepDown'
+  | 'octave'
+  | 'arch'
+  | 'call'
+  | 'thirds'
+  | 'riff'
+  | 'anchor';
 
 /** Parses a one-bar rhythm: `x` starts a note, `-` holds it, `.` rests. */
 export function parseCell(cell: string): { step: number; len: number }[] {
@@ -41,6 +57,17 @@ export function tidy(motif: Motif): Motif {
 
 /** Pitch shape for `count` notes of a given kind. `octave` is scale steps per octave. */
 export function contour(kind: ContourKind, count: number, rng: Rng, octave: number): number[] {
+  if (kind === 'anchor') {
+    const out = new Array<number>(count).fill(0);
+    if (count < 2) return out;
+    // The move comes late in the figure, after the home note has been heard.
+    const slots = Array.from({ length: count - 1 }, (_, i) => i + 1);
+    const at = rng.weighted(slots, slots.map((i) => 0.5 + i / count));
+    const jump = rng.weighted([2, 3, 4, -1, -2], [2, 2, 1.2, 1.5, 1]);
+    out[at] = jump;
+    if (at + 1 < count && rng.chance(0.5)) out[at + 1] = jump - Math.sign(jump);
+    return out;
+  }
   const out: number[] = [0];
   const dir = rng.chance(0.5) ? 1 : -1;
   const upper = rng.pick([2, 3, 4]);
@@ -90,9 +117,9 @@ export function contour(kind: ContourKind, count: number, rng: Rng, octave: numb
         break;
     }
   }
-  // A little roughness so two motifs of the same kind never come out identical.
-  const exact = kind === 'pedal' || kind === 'octave' || kind === 'thirds' || kind === 'riff';
-  return out.map((d, i) => (i > 0 && !exact && rng.chance(0.15) ? d + rng.pick([-1, 1]) : d));
+  // A little roughness so two motifs of the same kind differ, kept small so the shape still reads.
+  const exact = kind === 'pedal' || kind === 'octave' || kind === 'thirds' || kind === 'riff' || kind === 'repeat';
+  return out.map((d, i) => (i > 0 && !exact && rng.chance(0.08) ? d + rng.pick([-1, 1]) : d));
 }
 
 // ---------------------------------------------------------------------------
@@ -159,11 +186,11 @@ const BOLD_CELLS: Record<StyleDef['id'], string[]> = {
 };
 
 const CONTOURS: Record<StyleDef['id'], [ContourKind, number][]> = {
-  ukg: [['repeat', 2], ['pedal', 2], ['turn', 2], ['leapBack', 2], ['zigzag', 1.5], ['riff', 1.5]],
-  house: [['riff', 3], ['pedal', 3], ['arpUp', 1.5], ['octave', 1.5], ['stepDown', 1], ['repeat', 2]],
-  deepHouse: [['stepDown', 2.5], ['leapBack', 2.5], ['turn', 2], ['arpUp', 1.5], ['zigzag', 1.5], ['riff', 1]],
-  melodicHouse: [['arpUp', 3], ['zigzag', 2], ['stepDown', 2], ['leapBack', 2], ['octave', 1], ['riff', 0.5]],
-  rap: [['pedal', 2.5], ['repeat', 2], ['turn', 2], ['stepDown', 2], ['leapBack', 1.5], ['riff', 1.5]],
+  ukg: [['anchor', 3], ['repeat', 2], ['pedal', 2], ['turn', 2], ['leapBack', 2], ['zigzag', 1], ['riff', 1.5]],
+  house: [['riff', 3], ['pedal', 3], ['anchor', 1.5], ['arpUp', 1.5], ['octave', 1.5], ['stepDown', 1], ['repeat', 2]],
+  deepHouse: [['stepDown', 2.5], ['leapBack', 2.5], ['turn', 2], ['anchor', 1], ['arpUp', 1.5], ['zigzag', 1.5], ['riff', 1]],
+  melodicHouse: [['arpUp', 3], ['zigzag', 2], ['stepDown', 2], ['leapBack', 2], ['octave', 1], ['anchor', 0.5], ['riff', 0.5]],
+  rap: [['anchor', 2.5], ['pedal', 2.5], ['repeat', 2], ['turn', 2], ['stepDown', 2], ['leapBack', 1.5], ['riff', 1.5]],
 };
 
 /** Contours offered as creativity rises. */
@@ -175,9 +202,21 @@ const BOLD_CONTOURS: Record<StyleDef['id'], [ContourKind, number][]> = {
   rap: [['call', 1.5], ['thirds', 1]],
 };
 
-/** Onsets per bar the density asks for. */
-export function targetCount(density: number): number {
-  return 2.5 + density * 7;
+/**
+ * Onsets per bar the density asks for, by style. UKG and deep house toplines leave space, the
+ * way a vocal does; house and melodic house riffs run a little busier.
+ */
+const NOTES: Record<StyleDef['id'], [number, number]> = {
+  ukg: [2, 5.5],
+  house: [2.5, 6.5],
+  deepHouse: [2, 6],
+  melodicHouse: [2.5, 6.5],
+  rap: [2.5, 6],
+};
+
+export function targetCount(density: number, style: StyleDef['id'] = 'house'): number {
+  const [base, span] = NOTES[style];
+  return base + density * span;
 }
 
 function weightedRhythm(
@@ -187,7 +226,7 @@ function weightedRhythm(
   avoid: ReadonlySet<number>,
   groove: readonly number[],
 ): { step: number; len: number }[] {
-  const target = Math.max(2, Math.min(12, Math.round(targetCount(density) + rng.float(-1, 1))));
+  const target = Math.max(2, Math.min(12, Math.round(targetCount(density, style.id) + rng.float(-1, 1))));
   const weights = style.melodyAccent.map(
     (w, s) => (s % 2 === 1 ? w * (0.35 + density) : w) * (avoid.has(s) ? 0.15 : 1) * (1 + GROOVE_PULL * (groove[s] ?? 0)),
   );
@@ -206,19 +245,86 @@ function weightedRhythm(
   });
 }
 
-/** Adds or removes onsets until a cell is about as busy as the density asks. */
-function fitDensity(rng: Rng, hits: { step: number; len: number }[], style: StyleDef, density: number) {
-  const out = hits.map((h) => ({ ...h }));
-  const target = Math.round(targetCount(density));
-  while (out.length > Math.max(2, target + 1)) out.splice(rng.int(1, out.length - 1), 1);
-  let guard = 0;
-  while (out.length < target - 1 && guard++ < 20) {
-    const taken = new Set(out.map((h) => h.step));
-    const free = style.melodyAccent.map((_, s) => s).filter((s) => !taken.has(s));
-    if (!free.length) break;
-    out.push({ step: rng.weighted(free, free.map((s) => style.melodyAccent[s])), len: 1 });
+/**
+ * Brings a cell to about the busyness the density asks for without losing its shape: the weakest
+ * hits make way (never the first), or the longest note splits into a repeated pair.
+ */
+function fitDensity(hits: { step: number; len: number }[], style: StyleDef, density: number) {
+  let out = hits.map((h) => ({ ...h }));
+  const target = Math.round(targetCount(density, style.id));
+  while (out.length > Math.max(2, target + 1)) {
+    let weakest = 1;
+    for (let i = 2; i < out.length; i++) if (style.melodyAccent[out[i].step] < style.melodyAccent[out[weakest].step]) weakest = i;
+    out.splice(weakest, 1);
   }
-  return fitHits(out.sort((a, b) => a.step - b.step), STEPS_PER_BAR);
+  for (let guard = 0; out.length < target - 1 && guard < 8; guard++) {
+    let longest = -1;
+    out.forEach((h, i) => {
+      if (h.len >= 2 && (longest < 0 || h.len > out[longest].len)) longest = i;
+    });
+    if (longest < 0) break;
+    const h = out[longest];
+    const half = Math.ceil(h.len / 2);
+    out = [...out.slice(0, longest), { step: h.step, len: half }, { step: h.step + half, len: h.len - half }, ...out.slice(longest + 1)];
+  }
+  return fitHits(out, STEPS_PER_BAR);
+}
+
+/**
+ * One small, seeded change to a style cell, so two loops that draw the same cell still get their
+ * own rhythm: a hit nudged a sixteenth (never the first), a note split into a repeated pair, or a
+ * hit tied over into the next. The figure is made once per motif, so it stays the loop's own.
+ */
+function personalise(rng: Rng, hits: { step: number; len: number }[]): { step: number; len: number }[] {
+  if (!rng.chance(0.7) || hits.length < 2) return hits;
+  const taken = new Set(hits.map((h) => h.step));
+  const move = rng.weighted(['nudge', 'split', 'tie'] as const, [2, 1, 1]);
+  if (move === 'nudge') {
+    const i = rng.int(1, hits.length - 1);
+    const to = hits[i].step + rng.pick([-1, 1]);
+    if (to <= hits[i - 1].step || to >= STEPS_PER_BAR || taken.has(to)) return hits;
+    return fitHits(hits.map((h, k) => (k === i ? { step: to, len: h.len } : k === i - 1 ? { ...h, len: Math.min(h.len, to - h.step) } : h)), STEPS_PER_BAR);
+  }
+  if (move === 'split') {
+    const long = hits.map((_, i) => i).filter((i) => hits[i].len >= 2);
+    if (!long.length) return hits;
+    const i = rng.pick(long);
+    const half = Math.ceil(hits[i].len / 2);
+    return fitHits([...hits.slice(0, i), { step: hits[i].step, len: half }, { step: hits[i].step + half, len: hits[i].len - half }, ...hits.slice(i + 1)], STEPS_PER_BAR);
+  }
+  const i = rng.int(0, hits.length - 2);
+  const merged = { step: hits[i].step, len: hits[i + 1].step + hits[i + 1].len - hits[i].step };
+  return hits.length > 2 ? fitHits([...hits.slice(0, i), merged, ...hits.slice(i + 2)], STEPS_PER_BAR) : hits;
+}
+
+/**
+ * A half-bar figure stated twice, the second time a little changed: a sixteenth later, cut short,
+ * or with one note added. Repetition inside the bar is what makes a line easy to remember.
+ */
+function echoRhythm(rng: Rng, style: StyleDef, density: number): { step: number; len: number }[] {
+  const per = Math.max(1, Math.min(5, Math.round(targetCount(density, style.id) / 2)));
+  const weights = style.melodyAccent.slice(0, 8);
+  const chosen = new Set<number>([rng.weighted([0, 1, 2, 3], weights.slice(0, 4))]);
+  while (chosen.size < per) {
+    const free = [0, 1, 2, 3, 4, 5, 6, 7].filter((s) => !chosen.has(s));
+    chosen.add(rng.weighted(free, free.map((s) => weights[s] + 0.05)));
+  }
+  const head = [...chosen].sort((a, b) => a - b);
+  let tail = head.map((s) => s + 8);
+  const change = rng.weighted(['same', 'shift', 'trim', 'add'] as const, [3, 1.5, 1.5, 1]);
+  if (change === 'shift') tail = tail.map((s, i) => (i === tail.length - 1 && s + 1 < STEPS_PER_BAR ? s + 1 : s));
+  if (change === 'trim' && tail.length > 1) tail = tail.slice(0, -1);
+  if (change === 'add') {
+    const free = [9, 10, 11, 12, 13, 14, 15].filter((s) => !tail.includes(s));
+    if (free.length) tail = [...tail, rng.pick(free)].sort((a, b) => a - b);
+  }
+  const steps = [...head, ...tail];
+  const gate = rng.chance(style.melodyRest) ? rng.float(0.4, 0.75) : 1;
+  return steps.map((step, i) => {
+    const gap = (steps[i + 1] ?? STEPS_PER_BAR) - step;
+    const len = Math.min(gap, style.melodyMaxLen);
+    return { step, len: len >= 2 ? Math.max(1, Math.round(len * gate)) : len };
+  });
 }
 
 export interface MotifOptions {
@@ -261,18 +367,26 @@ export function makeMotif(rng: Rng, style: StyleDef, density: number, octave: nu
   // A riff needs a whole groove cell; an answer steering round the call's notes can't have one.
   if (kind === 'riff' && avoid.size) kind = 'repeat';
   const riff = kind === 'riff';
-  const fromCell = riff || (!avoid.size && rng.chance(0.6));
+  // A style cell, or a half-bar figure echoed; free onsets only for answers that must steer round the call.
+  const fromCell = riff || (!avoid.size && rng.chance(0.55));
+  const echo = !fromCell && !avoid.size && rng.chance(0.8);
   const cells = [...CELLS[style.id], ...BOLD_CELLS[style.id]];
   // Cells that share onsets with the other parts are favoured, so the parts move together. A riff
   // takes its cell as it is, so it also favours cells about as busy as the density asks.
   const cellWeights = cells.map((cell, i) => {
     const hits = parseCell(cell);
     const shared = hits.reduce((a, h) => a + (groove[h.step] ?? 0), 0) / hits.length;
-    const fit = riff ? Math.exp(-0.5 * Math.abs(hits.length - targetCount(density))) : 1;
+    const fit = riff ? Math.exp(-0.5 * Math.abs(hits.length - targetCount(density, style.id))) : 1;
     return (i < CELLS[style.id].length ? 1 : bold * 0.8) * Math.exp(GROOVE_PULL * shared) * fit;
   });
   const cell = fromCell ? parseCell(rng.weighted(cells, cellWeights)) : null;
-  const rhythm = cell ? (riff ? cell : fitDensity(rng, cell, style, density)) : weightedRhythm(rng, style, density, avoid, groove);
+  const rhythm = cell
+    ? riff
+      ? cell
+      : personalise(rng, fitDensity(cell, style, density))
+    : echo
+      ? echoRhythm(rng, style, density)
+      : weightedRhythm(rng, style, density, avoid, groove);
   const shape = riff ? riffShape(rhythm, rng) : contour(kind, rhythm.length, rng, octave);
   return tidy(rhythm.map((h, i) => ({ ...h, deg: shape[i] })));
 }

@@ -32,6 +32,11 @@ export interface NoteEvent {
   duration: number;
   /** MIDI velocity, 1–127. */
   velocity: number;
+  /**
+   * Ticks off the grid, early (negative) or late, applied after swing when the note is played or
+   * exported: the feel of the part. Absent means on the grid. The editor works on `start`.
+   */
+  nudge?: number;
 }
 
 export type ScaleId =
@@ -117,8 +122,10 @@ export interface CompositionSettings {
    * chords, chromatic approach notes, leaps, fills and rhythmic surprises. 0 keeps to the basics.
    */
   creativity: number;
-  /** Master seed. The progression derives from it directly. */
+  /** Master seed. The progression derives from it directly, unless `harmonySeed` is set. */
   seed: number;
+  /** Set by New chords: the progression's own seed, so the harmony can change on its own. */
+  harmonySeed?: number;
   /** Per-track seeds, so one part can be regenerated without touching the rest. */
   trackSeeds: TrackSeeds;
   phrase: PhraseForm;
@@ -158,6 +165,12 @@ export type DrumLevel = 'off' | 'light' | 'full' | 'build';
 /** A low-pass move across the whole section: none, held dark, or opening up into what follows. */
 export type FilterMove = 'open' | 'dark' | 'rise';
 
+/**
+ * Which version of the loop a section plays: A as written, A1 (A′) with new endings, A2 (A″) a
+ * busier return, B a contrast made from the same notes, reduced the bare bones.
+ */
+export type SectionMaterial = 'A' | 'A1' | 'A2' | 'B' | 'reduced';
+
 export interface SongSection {
   id: string;
   kind: SectionKind;
@@ -166,6 +179,8 @@ export interface SongSection {
   parts: Record<TrackId, boolean>;
   drums: DrumLevel;
   filter: FilterMove;
+  /** Which version of the loop it plays. Unset or auto: chosen from the section's kind and place in the song. */
+  material?: SectionMaterial | 'auto';
 }
 
 export interface Arrangement {
@@ -206,6 +221,13 @@ export interface ImportSource {
   picked: Partial<Record<TrackId, number>>;
 }
 
+/** What Generate and changes to the music leave alone. */
+export interface Locks {
+  tracks: TrackId[];
+  /** 0-based bars whose notes, in every part, are kept. */
+  bars: number[];
+}
+
 export interface Composition {
   settings: CompositionSettings;
   progression: Chord[];
@@ -215,6 +237,13 @@ export interface Composition {
   arrangement: Arrangement;
   /** Set while uploaded parts are held: those parts are kept and everything else is written around them. */
   source?: ImportSource;
+  /** Locked parts and bars. Unset: nothing locked. */
+  locks?: Locks;
+  /**
+   * Parts changed by hand since they were written. They are kept when another part is rewritten
+   * and moved, not rewritten, when only the key changes. Unset: none.
+   */
+  edited?: TrackId[];
 }
 
 export function totalTicks(bars: number): number {

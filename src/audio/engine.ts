@@ -6,6 +6,7 @@ import {
   loopTickAt,
   sectionAt,
   songLength,
+  songNotes,
   songSpans,
   type SongSpan,
 } from '../core/arrangement';
@@ -392,9 +393,10 @@ export class AudioEngine implements PlaybackClock {
     graph.delay.delayTime.value = (60 / settings.bpm) * 0.75;
     this.applySounds();
 
+    // A song's sections each play their own version of the loop, so its notes are laid out once.
     graph.notes.clear();
-    for (const n of composition.notes) {
-      const span = swungSpan(n.start, n.duration, settings.swing);
+    for (const n of this.spans ? songNotes(composition) : composition.notes) {
+      const span = swungSpan(n.start, n.duration, settings.swing, n.nudge);
       graph.notes.add({
         time: `${Math.round(span.start)}i`,
         kind: 'note',
@@ -413,8 +415,9 @@ export class AudioEngine implements PlaybackClock {
 
     this.applyAutomation(graph, composition, loopEnd);
 
-    // In song mode the loop parts repeat under the whole arrangement; the rest is laid out once.
-    for (const part of [graph.notes, graph.beat, graph.automation]) {
+    // In song mode the beat and automation repeat under the whole arrangement; the rest is laid out once.
+    graph.notes.loop = false;
+    for (const part of [graph.beat, graph.automation]) {
       part.loop = !!this.spans;
       part.loopEnd = `${loopEnd}i`;
     }

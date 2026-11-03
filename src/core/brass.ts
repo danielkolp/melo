@@ -225,13 +225,13 @@ function answers(ctx: Ctx, pool: readonly number[]): void {
       const chord = chordAt(progression, start);
       let index = clamp(anchor + shape[i], 0, pool.length - 1);
       if (step % 4 === 0) index = snapToChordTone(pool, chord.tones, index, Math.sign(shape[i] - (shape[i - 1] ?? shape[i])));
-      let pitch = fitToChord(pool[index], chord);
+      let pitch = fitToChord(pool[index], chord, REGISTERS.brass);
       const floor = melodyFloor(melody, start, start + duration);
       if (pitch > floor - 2) pitch -= 12;
       if (pitch < REGISTERS.brass.low || pitch > floor - 2) return;
       push(pitch, start, duration, step % 4 === 0 ? 92 : 86);
       if (plan.harmony) {
-        const below = fitToChord(pool[clamp(nearestIndex(pool, pitch) - plan.harmony, 0, pool.length - 1)], chord);
+        const below = fitToChord(pool[clamp(nearestIndex(pool, pitch) - plan.harmony, 0, pool.length - 1)], chord, REGISTERS.brass);
         if (below >= REGISTERS.brass.low && below < pitch - 2) push(below, start, duration, 80);
       }
     });
@@ -247,7 +247,7 @@ function doubles(ctx: Ctx, pool: readonly number[]): void {
     if (!plays(plan.entry, Math.floor(n.start / TICKS_PER_BAR), settings.bars)) continue;
     const chord = chordAt(progression, n.start);
     if (!key.has(pc(n.pitch)) && !(chord.scale ?? chord.tones).includes(pc(n.pitch))) continue;
-    let pitch = plan.harmony ? fitToChord(pool[clamp(nearestIndex(pool, n.pitch) - plan.harmony, 0, pool.length - 1)], chord) : n.pitch - 12;
+    let pitch = plan.harmony ? fitToChord(pool[clamp(nearestIndex(pool, n.pitch) - plan.harmony, 0, pool.length - 1)], chord, REGISTERS.brass) : n.pitch - 12;
     while (pitch > high || pitch > n.pitch - 3) pitch -= 12;
     while (pitch < low) pitch += 12;
     if (pitch > high || pitch > n.pitch - 3) continue;

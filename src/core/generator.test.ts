@@ -8,11 +8,12 @@ import {
   generateProgression,
   regenerateTrack,
 } from './generator';
+import { bassMetrics } from './score';
 import { isTurnaround } from './shared';
 import { STYLE_IDS } from './styles';
 import { SCALE_IDS, harmonyPitchClasses, scalePitchClasses } from './theory';
 import { chordSymbol } from './theory';
-import { STEP, TICKS_PER_BAR, TRACK_IDS, totalTicks, type BarCount, type Chord, type NoteEvent, type TrackId } from './types';
+import { STEP, TICKS_PER_BAR, TRACK_IDS, totalTicks, type BarCount, type Chord, type NoteEvent, type StyleId, type TrackId } from './types';
 
 const pc = (p: number) => ((p % 12) + 12) % 12;
 const byTrack = (notes: NoteEvent[], track: TrackId) => notes.filter((n) => n.track === track);
@@ -214,14 +215,26 @@ describe('melody', () => {
     }
   });
 
-  it('lands on chord tones on beats 1 and 3', () => {
+  it('lands on chord tones on beats 1 and 3, or holds a suspension the next note resolves by step', () => {
+    let strong = 0;
+    let suspended = 0;
+    let unresolved = 0;
     for (const settings of corpus()) {
       const { notes, progression } = generateComposition(settings);
-      for (const n of byTrack(notes, 'melody')) {
-        if (n.start % (STEP * 8) !== 0) continue;
-        expect(chordAt(progression, n.start).tones).toContain(pc(n.pitch));
-      }
+      const melody = byTrack(notes, 'melody');
+      const tone = (n: NoteEvent) => chordAt(progression, n.start).tones.includes(pc(n.pitch));
+      melody.forEach((n, i) => {
+        if (n.start % (STEP * 8) !== 0) return;
+        strong++;
+        if (tone(n)) return;
+        const next = melody[i + 1];
+        if (next && Math.abs(next.pitch - n.pitch) <= 2 && tone(next)) suspended++;
+        else unresolved++;
+      });
     }
+    // Tension is allowed, a little of it, and it resolves.
+    expect(suspended / strong).toBeLessThan(0.2);
+    expect(unresolved / strong).toBeLessThan(0.02);
   });
 
   it('resolves the phrase on a chord tone of the final chord', () => {
@@ -324,12 +337,16 @@ describe('planning', () => {
   const rhythm = (notes: NoteEvent[], from: number, to: number) =>
     [...new Set(notes.filter((n) => n.start >= from && n.start < to).map((n) => `${n.start - from}:${n.duration}`))].join();
 
-  it('plays the bass the same way in every bar away from the ends of phrases', () => {
+  it('plays the bass as a two-bar figure away from the ends of phrases', () => {
     for (const settings of corpus()) {
       const { notes, progression } = generateComposition(settings);
       const bass = byTrack(notes, 'bass');
-      const shapes = new Set(steadyBars(progression, settings.bars).map((b) => rhythm(bass, b * TICKS_PER_BAR, (b + 1) * TICKS_PER_BAR)));
-      expect(shapes.size, `${settings.style} ${settings.seed}`).toBeLessThanOrEqual(1);
+      // Every first bar of a pair alike, and every second bar alike.
+      for (const parity of [0, 1]) {
+        const bars = steadyBars(progression, settings.bars).filter((b) => b % 2 === parity);
+        const shapes = new Set(bars.map((b) => rhythm(bass, b * TICKS_PER_BAR, (b + 1) * TICKS_PER_BAR)));
+        expect(shapes.size, `${settings.style} ${settings.seed}`).toBeLessThanOrEqual(1);
+      }
     }
   });
 
@@ -360,7 +377,7 @@ describe('planning', () => {
     }
   });
 
-  it('locks the bass to the chords more often than chance', () => {
+  it('lands some of the bass with the chord stabs, but not all of it', () => {
     let together = 0;
     let apart = 0;
     for (const settings of corpus()) {
@@ -368,7 +385,67 @@ describe('planning', () => {
       const stabs = new Set(byTrack(notes, 'chords').map((n) => n.start));
       for (const n of byTrack(notes, 'bass')) (stabs.has(n.start) ? together++ : apart++);
     }
-    expect(together / (together + apart)).toBeGreaterThan(0.45);
+    const share = together / (together + apart);
+    expect(share).toBeGreaterThan(0.2);
+    expect(share).toBeLessThan(0.75);
+  });
+});
+
+describe('groove', () => {
+  const metrics = (style: StyleId) =>
+    SEEDS.map((seed) => {
+      const settings = createSettings({ style, seed, bars: 8, key: seed % 12 });
+      return bassMetrics(byTrack(generateComposition(settings).notes, 'bass'), settings, 8);
+    });
+  const avg = (xs: number[]) => xs.reduce((a, x) => a + x, 0) / xs.length;
+
+  it('sits the UKG bass on some kicks, answers others and stays off the backbeat', () => {
+    const m = metrics('ukg');
+    expect(avg(m.map((x) => x.reinforce))).toBeGreaterThan(0.25);
+    expect(avg(m.map((x) => x.reinforce))).toBeLessThan(0.65);
+    expect(avg(m.map((x) => x.answer))).toBeGreaterThan(0.15);
+    expect(avg(m.map((x) => x.onClap))).toBeLessThan(0.1);
+    // A two-bar figure: the second bar answers the first in most loops.
+    expect(avg(m.map((x) => x.period1))).toBeLessThan(0.8);
+    expect(avg(m.map((x) => x.period2))).toBeGreaterThan(0.85);
+  });
+
+  it('gives each style its own bass against the kick', () => {
+    const reinforce = (style: StyleId) => avg(metrics(style).map((x) => x.reinforce));
+    const answer = (style: StyleId) => avg(metrics(style).map((x) => x.answer));
+    // House rides the offbeats; melodic house rolls between the kicks; the 808 follows the kick.
+    expect(answer('house')).toBeGreaterThan(0.5);
+    expect(reinforce('melodicHouse')).toBeLessThan(0.3);
+    expect(reinforce('rap')).toBeGreaterThan(reinforce('house'));
+  });
+
+  it('plays ghost notes quietly and short, at most one a bar, only where the style has them', () => {
+    let ghosts = 0;
+    for (const settings of corpus()) {
+      const bass = byTrack(generateComposition(settings).notes, 'bass');
+      const quiet = bass.filter((n) => n.velocity < 72);
+      for (const n of quiet) {
+        expect(n.duration).toBe(STEP);
+        expect(n.velocity).toBeLessThan(Math.min(...bass.filter((b) => b.velocity >= 72).map((b) => b.velocity)));
+      }
+      const perBar = new Map<number, number>();
+      for (const n of quiet) perBar.set(Math.floor(n.start / TICKS_PER_BAR), (perBar.get(Math.floor(n.start / TICKS_PER_BAR)) ?? 0) + 1);
+      expect(Math.max(0, ...perBar.values())).toBeLessThanOrEqual(1);
+      if (settings.style === 'rap' || settings.style === 'melodicHouse') expect(quiet).toHaveLength(0);
+      ghosts += quiet.length;
+    }
+    expect(ghosts).toBeGreaterThan(0);
+  });
+
+  it('keeps the chords under the melody wherever they sound together', () => {
+    for (const settings of corpus()) {
+      const { notes } = generateComposition(settings);
+      const melody = byTrack(notes, 'melody');
+      let over = 0;
+      const chords = byTrack(notes, 'chords');
+      for (const c of chords) if (melody.some((m) => m.start < c.start + c.duration && m.start + m.duration > c.start && c.pitch >= m.pitch)) over++;
+      expect(over / Math.max(1, chords.length), `${settings.style} ${settings.seed}`).toBeLessThan(0.05);
+    }
   });
 });
 

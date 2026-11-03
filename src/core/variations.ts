@@ -1,3 +1,4 @@
+import { feel } from './expression';
 import { CELLS, parseCell } from './motif';
 import { createRng, deriveSeed, type Rng } from './random';
 import { chordAt, clamp, fitToChord, hitsAt, nearestIndex, noteId, pc, snapToChordTone, velocity } from './shared';
@@ -9,7 +10,9 @@ import {
   VARIATION_COUNT,
   totalTicks,
   type Chord,
+  type CompositionSettings,
   type ImportSource,
+  type ScaleId,
   type NoteEvent,
   type StyleId,
   type TrackId,
@@ -752,6 +755,8 @@ const LINE_MOVES: Move[] = [newNotes, newRhythm, syncopate, push, invert, revers
 const BASS_MOVES: Move[] = [octaves, approach, walk, anticipate, busier, rootsOnly, legato, walkUp, bassGroove, syncopate, push];
 const CHORD_MOVES: Move[] = [inversion(1), inversion(-1), spread, addColour, triads, restab, offbeat, pads, pushChanges, broken];
 
+const MOVE_BY_ID = new Map([...LINE_MOVES, ...BASS_MOVES, ...CHORD_MOVES].map((m) => [m.id, m]));
+
 function movesFor(track: TrackId, style: StyleId): Move[] {
   if (track === 'chords') return CHORD_MOVES;
   if (track === 'bass') return BASS_MOVES.map((m) => (m.id === 'legato' && style === 'rap' ? { ...m, weight: 1.4 } : m));
@@ -762,7 +767,7 @@ function movesFor(track: TrackId, style: StyleId): Move[] {
 
 /** Keeps a take playable: on the grid, inside the loop and the range, one note at a time where the part needs it. */
 function tidyTake(ctx: Ctx, notes: readonly Tone[]): Tone[] {
-  const mono = ctx.track !== 'chords';
+  const mono = ctx.track !== 'chords' && ctx.track !== 'brass';
   let out = notes
     .map((n) => {
       const start = clamp(Math.round(n.start / STEP) * STEP, 0, ctx.end - STEP);
@@ -770,7 +775,7 @@ function tidyTake(ctx: Ctx, notes: readonly Tone[]): Tone[] {
       let pitch = n.pitch;
       while (pitch > ctx.high) pitch -= 12;
       while (pitch < ctx.low) pitch += 12;
-      if (ctx.track !== 'bass' && ctx.track !== 'chords') pitch = fitToChord(pitch, chordOf(ctx, start));
+      if (ctx.track !== 'bass' && ctx.track !== 'chords') pitch = fitToChord(pitch, chordOf(ctx, start), ctx);
       return { pitch, start, duration, velocity: velocity(n.velocity) };
     })
     .sort((a, b) => a.start - b.start || (ctx.track === 'bass' ? a.pitch - b.pitch : b.pitch - a.pitch));
@@ -794,6 +799,69 @@ function lowerFirst(text: string): string {
   return text.charAt(0).toLowerCase() + text.slice(1);
 }
 
+/** What every move needs to know about a part: its key, range and harmony. */
+function contextFor(
+  track: TrackId,
+  style: StyleId,
+  harmony: { key: number; scale: ScaleId; bars: number; progression: readonly Chord[] },
+  pitches: readonly number[],
+  amount: number,
+): Omit<Ctx, 'rng'> {
+  const melodic = track === 'melody' || track === 'counter' || track === 'brass';
+  const pcs = melodic ? scalePitchClasses(harmony.key, harmony.scale) : harmonyPitchClasses(harmony.key, harmony.scale);
+  return {
+    amount,
+    style: STYLES[style],
+    track,
+    bars: harmony.bars,
+    end: totalTicks(harmony.bars),
+    progression: harmony.progression,
+    pool: pitchesInRange(pcs, 12, 120),
+    octave: pcs.length,
+    low: Math.max(21, Math.min(...pitches) - 7),
+    high: Math.min(108, Math.max(...pitches) + 7),
+    keyScale: harmonyPitchClasses(harmony.key, harmony.scale),
+  };
+}
+
+/**
+ * A part moved on by the named moves, applied in order: the variation cards' moves, chosen rather
+ * than dealt, for a song section that should be the loop but further along. A move that doesn't
+ * apply is skipped. Notes that stay where they were keep their feel; new ones get the style's.
+ * Returns null when nothing changed. Same notes, moves and seed, same result.
+ */
+export function developPart(
+  notes: readonly NoteEvent[],
+  settings: CompositionSettings,
+  progression: readonly Chord[],
+  moves: readonly string[],
+  seed: number,
+  amount = 0.5,
+): NoteEvent[] | null {
+  if (!notes.length) return null;
+  const track = notes[0].track;
+  const original: Tone[] = notes.map(({ pitch, start, duration, velocity: v }) => ({ pitch, start, duration, velocity: v }));
+  const ctx: Ctx = {
+    ...contextFor(track, settings.style, { ...settings, progression }, original.map((n) => n.pitch), amount),
+    rng: createRng(seed),
+  };
+  let line = original;
+  for (const id of moves) {
+    const next = MOVE_BY_ID.get(id)?.run(tidyTake(ctx, line), ctx);
+    if (next) line = next.notes;
+  }
+  const tidied = tidyTake(ctx, line);
+  if (!tidied.length || same(tidied, original)) return null;
+  const felt = new Map(notes.map((n) => [`${n.start}:${n.pitch}`, n.nudge ?? 0]));
+  const performed = notes.some((n) => n.nudge !== undefined);
+  return tidied.map((n, i) => {
+    const note: NoteEvent = { ...n, id: noteId(track, seed, i), track };
+    const nudge = felt.get(`${n.start}:${n.pitch}`) ?? (performed ? feel(settings.style, track, n) : 0);
+    if (nudge) note.nudge = nudge;
+    return note;
+  });
+}
+
 /**
  * Six variations of one uploaded part. Each card leads with a different move, picked by weight,
  * and adds one or two more as `amount` rises. Same source, same cards.
@@ -802,22 +870,7 @@ export function makeVariations(source: ImportSource, track: TrackId, style: Styl
   const part = source.parts.find((p) => p.track === track);
   if (!part || !part.notes.length) return [];
   const original: Tone[] = part.notes.map(({ pitch, start, duration, velocity: v }) => ({ pitch, start, duration, velocity: v }));
-  const melodic = track === 'melody' || track === 'counter' || track === 'brass';
-  const pcs = melodic ? scalePitchClasses(source.key, source.scale) : harmonyPitchClasses(source.key, source.scale);
-  const pitches = original.map((n) => n.pitch);
-  const base = {
-    amount: source.amount,
-    style: STYLES[style],
-    track,
-    bars: source.bars,
-    end: totalTicks(source.bars),
-    progression: source.progression,
-    pool: pitchesInRange(pcs, 12, 120),
-    octave: pcs.length,
-    low: Math.max(21, Math.min(...pitches) - 7),
-    high: Math.min(108, Math.max(...pitches) + 7),
-    keyScale: harmonyPitchClasses(source.key, source.scale),
-  };
+  const base = contextFor(track, style, source, original.map((n) => n.pitch), source.amount);
   const moves = movesFor(track, style);
   const leads = new Set<string>();
   const seen = new Set([signature(original)]);

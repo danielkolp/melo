@@ -1,7 +1,8 @@
 import { fitArrangement, suggestArrangement } from './arrangement';
 import { suggestAutomation } from './automation';
 import { generateBrass } from './brass';
-import { generateBass, generateChords, generateCounter, melodySettings, refreshAutomation, withTransition } from './generator';
+import { perform } from './expression';
+import { clearMelody, generateBass, generateChords, generateCounter, melodySettings, refreshAutomation, withTransition } from './generator';
 import { unswingTick } from './groove';
 import { generateMelody } from './melody';
 import { deriveSeed } from './random';
@@ -594,7 +595,7 @@ export function fitToBars<T extends { start: number; duration: number }>(items: 
   return out;
 }
 
-const renameNote = (n: NoteEvent, copy: number): NoteEvent => ({ ...n, id: `${n.id}~${copy}` });
+export const renameNote = (n: NoteEvent, copy: number): NoteEvent => ({ ...n, id: `${n.id}~${copy}` });
 
 /** The notes of one take: 0 the upload, 1–6 a variation card. */
 export function takeNotes(source: ImportSource, track: TrackId, style: StyleId, take = source.picked[track] ?? 0): NoteEvent[] {
@@ -661,9 +662,32 @@ export function composeAround(
   previousLanes: readonly AutomationLane[] = [],
   previousArrangement?: Arrangement,
 ): Composition {
-  const tracks = heldTracks(source);
-  const { progression } = held;
-  const keep = (track: TrackId) => held.notes.filter((n) => n.track === track);
+  return composeParts(settings, { ...held, tracks: heldTracks(source) }, previousLanes, previousArrangement, source);
+}
+
+/** Parts kept while the rest of the loop is written: uploaded, locked or edited ones. */
+export interface Fixed {
+  /** The harmony they were written over. */
+  progression: Chord[];
+  tracks: ReadonlySet<TrackId>;
+  notes: NoteEvent[];
+  /** A kept melody's phrasing. Unset: an uploaded melody, which carries every bar itself. */
+  phrasing?: Phrasing;
+}
+
+/**
+ * The loop written around fixed parts: their harmony and notes, exactly as they are, and fresh
+ * parts for the rest, which take the style's touch and their share of the transition.
+ */
+export function composeParts(
+  settings: CompositionSettings,
+  fixed: Fixed,
+  previousLanes: readonly AutomationLane[] = [],
+  previousArrangement?: Arrangement,
+  source?: ImportSource,
+): Composition {
+  const { tracks, progression } = fixed;
+  const keep = (track: TrackId) => fixed.notes.filter((n) => n.track === track);
 
   // As in a fresh loop, each written part locks to the ones already there, held parts included.
   const chords = tracks.has('chords') ? keep('chords') : generateChords(settings, progression, keep('bass'));
@@ -672,27 +696,30 @@ export function composeAround(
   let phrasing: Phrasing;
   if (tracks.has('melody')) {
     melody = keep('melody');
-    phrasing = heldPhrasing(settings.bars);
+    phrasing = fixed.phrasing ?? heldPhrasing(settings.bars);
   } else {
-    ({ notes: melody, phrasing } = generateMelody(melodySettings(settings, tracks), progression, [...chords, ...bass]));
+    ({ notes: melody, phrasing } = generateMelody(melodySettings(settings, tracks), progression));
   }
   // Written parts play their share of the loop's transition; held parts stay exactly as uploaded.
-  const ending = (track: TrackId, part: NoteEvent[]) => (tracks.has(track) ? part : withTransition(settings, progression, phrasing, track, part, melody));
+  const top = tracks.has('melody') ? melody : withTransition(settings, progression, phrasing, 'melody', melody);
+  const ending = (track: TrackId, part: NoteEvent[]) => (tracks.has(track) ? part : withTransition(settings, progression, phrasing, track, part, top));
   const counter = tracks.has('counter') ? keep('counter') : generateCounter(settings, progression, melody, phrasing);
   const brass = tracks.has('brass') ? keep('brass') : generateBrass(settings, progression, melody, counter, [...chords, ...bass]);
-  const notes = sortNotes([
-    ...ending('melody', melody),
+  // Written parts are played with the style's touch; held parts keep the upload's own.
+  const written = new Set(TRACK_IDS.filter((t) => !tracks.has(t)));
+  const notes = perform(settings, sortNotes([
+    ...top,
     ...ending('counter', counter),
     ...ending('brass', brass),
-    ...ending('chords', chords),
+    ...ending('chords', tracks.has('chords') ? chords : clearMelody(generateChords(settings, progression, keep('bass'), top), top)),
     ...ending('bass', bass),
-  ]);
+  ]), written);
   const automation = suggestAutomation({ settings, progression, phrasing, notes }, previousLanes);
   const arrangement =
     previousArrangement?.style === settings.style
       ? fitArrangement(previousArrangement, settings.bars)
       : suggestArrangement(settings.style, settings.bars);
-  return { settings, progression, phrasing, notes, automation, arrangement, source };
+  return { settings, progression, phrasing, notes, automation, arrangement, ...(source && { source }) };
 }
 
 /**
@@ -719,5 +746,7 @@ export function loadTake(composition: Composition, track: TrackId, take: number)
     fresh.push(...withTransition(settings, progression, phrasing, 'brass', generateBrass(settings, progression, melody, counter, around), melody));
   }
   const kept = composition.notes.filter((n) => !replaced.has(n.track));
-  return refreshAutomation({ ...composition, source: next, notes: sortNotes([...kept, ...fresh]) });
+  // The rewritten followers get the style's touch; the take itself plays as uploaded.
+  const followers = new Set([...replaced].filter((t) => t !== track));
+  return refreshAutomation({ ...composition, source: next, notes: sortNotes([...kept, ...perform(settings, fresh, followers)]) });
 }
