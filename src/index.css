@@ -1,0 +1,238 @@
+@import 'tailwindcss';
+
+/*
+ * Semantic colour tokens. Light is the default; [data-theme='dark'] on <html>
+ * swaps the values. Utilities read the variables, so `bg-panel`, `text-fg`
+ * and friends follow the theme without per-component branches.
+ */
+@theme {
+  --font-sans: 'Schibsted Grotesk Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'Martian Mono Variable', ui-monospace, 'SFMono-Regular', monospace;
+
+  /* Surfaces, back to front. */
+  --color-canvas: #ebe8e2;
+  --color-panel: #f6f5f2;
+  --color-well: #edebe6;
+  --color-tint: #e7e4de;
+  --color-raised: #ffffff;
+  /* Hairlines. */
+  --color-line: #e2dfd9;
+  --color-line-strong: #cdc9c1;
+  /* Text. */
+  --color-fg: #1d1c1a;
+  --color-fg-dim: #5c5852;
+  --color-fg-faint: #8f8a83;
+  /* Text on an `fg` background. */
+  --color-inverse: #f6f5f2;
+  /* Black keys in the key picker. */
+  --color-ebony: #2a2a2d;
+
+  --color-melody: #ee6335;
+  --color-counter: #14a585;
+  --color-brass: #c9970f;
+  --color-chords: #9877ee;
+  --color-bass: #3c6cf0;
+}
+
+[data-theme='dark'] {
+  --color-canvas: #131315;
+  --color-panel: #18181a;
+  --color-well: #1e1e21;
+  --color-tint: #242427;
+  --color-raised: #2c2c30;
+  --color-line: #27272b;
+  --color-line-strong: #39393f;
+  --color-fg: #ece8e1;
+  --color-fg-dim: #a6a199;
+  --color-fg-faint: #716d67;
+  --color-inverse: #131315;
+  --color-ebony: #0d0d0f;
+
+  --color-melody: #ff7448;
+  --color-counter: #2ec4a0;
+  --color-brass: #efbf3f;
+  --color-chords: #b79bff;
+  --color-bass: #4d7bff;
+
+  color-scheme: dark;
+}
+
+@layer base {
+  html {
+    color-scheme: light;
+  }
+
+  html,
+  body {
+    background: var(--color-panel);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  ::selection {
+    background: color-mix(in oklab, var(--color-melody) 35%, transparent);
+  }
+
+  :focus-visible {
+    outline: 1.5px solid var(--color-fg);
+    outline-offset: 2px;
+  }
+
+  button {
+    cursor: pointer;
+  }
+
+  button:disabled {
+    cursor: default;
+  }
+}
+
+@layer components {
+  /* Small panel labels, like the printing on hardware. */
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    font-weight: 450;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--color-fg-faint);
+  }
+
+  .readout {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.02em;
+  }
+
+  /* The stage: an even field with the faintest pool of light where the roll sits. */
+  .stage {
+    background: radial-gradient(90% 80% at 50% 45%, color-mix(in oklab, var(--color-canvas), white 28%) 0%, var(--color-canvas) 70%);
+  }
+
+  [data-theme='dark'] .stage {
+    background: radial-gradient(90% 80% at 50% 45%, #1d1d20 0%, var(--color-canvas) 70%);
+  }
+
+  .range {
+    --fill: 50%;
+    --accent: var(--color-fg);
+    appearance: none;
+    width: 100%;
+    height: 18px;
+    background: transparent;
+    cursor: pointer;
+  }
+
+  .range::-webkit-slider-runnable-track {
+    height: 2px;
+    border-radius: 2px;
+    background: linear-gradient(to right, var(--accent) var(--fill), var(--color-line-strong) var(--fill));
+  }
+
+  .range::-moz-range-track {
+    height: 2px;
+    border-radius: 2px;
+    background: linear-gradient(to right, var(--accent) var(--fill), var(--color-line-strong) var(--fill));
+  }
+
+  .range::-webkit-slider-thumb {
+    appearance: none;
+    width: 13px;
+    height: 13px;
+    margin-top: -5.5px;
+    border-radius: 999px;
+    background: var(--color-fg);
+    border: 3px solid var(--color-panel);
+    box-shadow: 0 0 0 1px var(--color-line-strong);
+    transition: transform 120ms ease;
+  }
+
+  .range::-moz-range-thumb {
+    width: 9px;
+    height: 9px;
+    border-radius: 999px;
+    background: var(--color-fg);
+    border: 3px solid var(--color-panel);
+    box-shadow: 0 0 0 1px var(--color-line-strong);
+  }
+
+  .range:hover::-webkit-slider-thumb,
+  .range:focus-visible::-webkit-slider-thumb {
+    transform: scale(1.15);
+  }
+
+  .range:focus-visible {
+    outline: none;
+  }
+
+  .range:focus-visible::-webkit-slider-thumb {
+    box-shadow: 0 0 0 1.5px var(--color-fg);
+  }
+
+  .no-spin::-webkit-outer-spin-button,
+  .no-spin::-webkit-inner-spin-button {
+    appearance: none;
+    margin: 0;
+  }
+
+  .no-spin {
+    -moz-appearance: textfield;
+  }
+
+  /* Hairline scrollbars that don't compete with the content. */
+  .quiet-scroll {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-line-strong) transparent;
+  }
+
+  /* What follows the pointer when a .mid is dragged out to a DAW. Rendered off-screen. */
+  .drag-chip {
+    --chip: var(--color-fg);
+    position: fixed;
+    top: 0;
+    left: -10000px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 280px;
+    padding: 6px 12px 6px 10px;
+    border-radius: 999px;
+    background: var(--color-raised);
+    box-shadow: inset 0 0 0 1px var(--color-line-strong);
+    color: var(--color-fg);
+    font-size: 12.5px;
+    white-space: nowrap;
+  }
+
+  .drag-chip > span:first-of-type {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .drag-chip > span:last-of-type {
+    margin-left: -4px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--color-fg-faint);
+  }
+
+  .drag-chip::before {
+    content: '';
+    flex: none;
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+    background: var(--chip);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0ms !important;
+    animation-duration: 0ms !important;
+  }
+}
